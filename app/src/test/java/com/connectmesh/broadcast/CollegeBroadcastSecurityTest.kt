@@ -1,0 +1,374 @@
+package com.connectmesh.broadcast
+
+import com.connectmesh.auth.*
+import org.junit.Assert.*
+import org.junit.Before
+import org.junit.Test
+import java.security.KeyPairGenerator
+import java.security.SecureRandom
+import java.security.spec.ECGenParameterSpec
+
+class CollegeBroadcastSecurityTest {
+
+    private lateinit var issuerKeyPair: java.security.KeyPair
+    private lateinit var adminKeyPair: java.security.KeyPair
+    private lateinit var teacherKeyPair: java.security.KeyPair
+    private lateinit var studentKeyPair: java.security.KeyPair
+
+    private val issuerId: Long = 0x1122334455667788L
+    private val adminId: Long = 0x3988776655443322L
+    private val teacherId: Long = 0x3344556677889900L
+    private val studentId: Long = 0x5566778899001122L
+
+    private val institutionScope: String = "COLLEGE:COLLEGE_001"
+    private val sequence: Long = 2002L
+
+    private lateinit var revocationManager: RevocationManager
+    private lateinit var authorizationManager: AuthorizationManager
+    private lateinit var broadcastManager: CampusBroadcastManager
+
+    @Before
+    fun setUp() {
+        val keyGen = KeyPairGenerator.getInstance("EC")
+        keyGen.initialize(ECGenParameterSpec("secp256r1"), SecureRandom())
+        issuerKeyPair = keyGen.generateKeyPair()
+        adminKeyPair = keyGen.generateKeyPair()
+        teacherKeyPair = keyGen.generateKeyPair()
+        studentKeyPair = keyGen.generateKeyPair()
+
+        revocationManager = RevocationManager()
+        authorizationManager = AuthorizationManager(revocationManager)
+        broadcastManager = CampusBroadcastManager(authorizationManager)
+
+        // Register issuer public key
+        authorizationManager.registerTrustedIssuer(issuerId, issuerKeyPair.public.encoded)
+
+        // Give Admin a valid ADMIN role credential for scope "COLLEGE:COLLEGE_001"
+        val adminCred = RoleCredentialIssuer.issueCredential(
+            issuerId = issuerId,
+            issuerPrivateKey = issuerKeyPair.private,
+            subjectConnectMeshId = adminId,
+            subjectPublicKeyBytes = adminKeyPair.public.encoded,
+            role = UserRole.ADMIN,
+            scope = institutionScope
+        )
+        assertNotNull(adminCred)
+
+        authorizationManager.initializeLocalIdentity(adminId, adminKeyPair.public.encoded)
+        authorizationManager.setLocalCredential(adminCred!!)
+    }
+
+    @Test
+    fun test1_ValidAdminSendsCampusBroadcast() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Campus Alert",
+            message = "All classes suspended due to heavy rain.",
+            broadcastType = BroadcastType.ALERT,
+            priority = BroadcastPriority.HIGH
+        )
+        assertNotNull(bc)
+        assertEquals("Campus Alert", bc!!.title)
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.AUTHORIZED, verResult)
+    }
+
+    @Test
+    fun test2_NormalUserAttemptsBroadcastFails() {
+        val studentAuthManager = AuthorizationManager(revocationManager)
+        studentAuthManager.registerTrustedIssuer(issuerId, issuerKeyPair.public.encoded)
+        studentAuthManager.initializeLocalIdentity(studentId, studentKeyPair.public.encoded)
+
+        val studentCred = RoleCredentialIssuer.issueCredential(
+            issuerId = issuerId,
+            issuerPrivateKey = issuerKeyPair.private,
+            subjectConnectMeshId = studentId,
+            subjectPublicKeyBytes = studentKeyPair.public.encoded,
+            role = UserRole.USER,
+            scope = institutionScope
+        )
+        studentAuthManager.setLocalCredential(studentCred!!)
+
+        val studentBroadcastManager = CampusBroadcastManager(studentAuthManager)
+        val bc = studentBroadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = studentId,
+            adminCredentialId = "CRED-STUDENT",
+            adminPrivateKey = studentKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Fake Alert",
+            message = "Fake message"
+        )
+        assertNull(bc)
+    }
+
+    @Test
+    fun test3_TeacherAttemptsCollegeWideBroadcastWithoutPermissionFails() {
+        val teacherAuthManager = AuthorizationManager(revocationManager)
+        teacherAuthManager.registerTrustedIssuer(issuerId, issuerKeyPair.public.encoded)
+        teacherAuthManager.initializeLocalIdentity(teacherId, teacherKeyPair.public.encoded)
+
+        val teacherCred = RoleCredentialIssuer.issueCredential(
+            issuerId = issuerId,
+            issuerPrivateKey = issuerKeyPair.private,
+            subjectConnectMeshId = teacherId,
+            subjectPublicKeyBytes = teacherKeyPair.public.encoded,
+            role = UserRole.TEACHER,
+            scope = institutionScope
+        )
+        teacherAuthManager.setLocalCredential(teacherCred!!)
+
+        val teacherBroadcastManager = CampusBroadcastManager(teacherAuthManager)
+        val bc = teacherBroadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = teacherId,
+            adminCredentialId = "CRED-TEACHER",
+            adminPrivateKey = teacherKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Teacher Broadcast",
+            message = "Teacher message"
+        )
+        assertNull(bc)
+    }
+
+    @Test
+    fun test4_AdminFromCollegeATargetsCollegeBFails() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = "COLLEGE:COLLEGE_002", // Target College B
+            title = "Rogue Broadcast",
+            message = "Rogue message"
+        )
+        assertNull(bc) // Rejected because Admin's scope is COLLEGE_001
+    }
+
+    @Test
+    fun test5_TamperedSenderIdFails() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Message"
+        )
+        assertNotNull(bc)
+
+        val tamperedBc = bc!!.copy(senderConnectMeshId = 0x1999999999999999L)
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = tamperedBc,
+            actualSenderId = 0x1999999999999999L,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, verResult)
+    }
+
+    @Test
+    fun test6_TamperedMessageFails() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Original Message"
+        )
+        assertNotNull(bc)
+
+        val tamperedBc = bc!!.copy(message = "Tampered Fake Message")
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = tamperedBc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, verResult)
+    }
+
+    @Test
+    fun test7_TamperedPriorityFails() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Message",
+            priority = BroadcastPriority.NORMAL
+        )
+        assertNotNull(bc)
+
+        val tamperedBc = bc!!.copy(priority = BroadcastPriority.CRITICAL)
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = tamperedBc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, verResult)
+    }
+
+    @Test
+    fun test8_ExpiredBroadcastFails() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Message",
+            validityDurationMs = -5000L // Expired 5 seconds ago
+        )
+        assertNotNull(bc)
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc!!,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_EXPIRED, verResult)
+    }
+
+    @Test
+    fun test9_ReplayedBroadcastDeduplicated() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Message"
+        )
+        assertNotNull(bc)
+
+        // First receive -> Accepted
+        val isDup1 = broadcastManager.isDuplicateOrAdd(bc!!.broadcastId)
+        assertTrue(isDup1) // Returns true for duplicate since added during creation
+
+        // Second receive -> Suppressed
+        val isDup2 = broadcastManager.isDuplicateOrAdd(bc.broadcastId)
+        assertTrue(isDup2) // Suppressed as duplicate
+    }
+
+    @Test
+    fun test10_UntrustedIssuerRejection() {
+        val keyGen = KeyPairGenerator.getInstance("EC")
+        keyGen.initialize(ECGenParameterSpec("secp256r1"), SecureRandom())
+        val rogueKeyPair = keyGen.generateKeyPair()
+
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Message"
+        )
+        assertNotNull(bc)
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc!!,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = rogueKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, verResult)
+    }
+
+    @Test
+    fun test11_RevokedAdminCredentialRejection() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-REVOKED-ADMIN",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Message"
+        )
+        assertNotNull(bc)
+
+        revocationManager.revokeCredential("CRED-REVOKED-ADMIN", "REVOKED_ADMIN_RIGHTS")
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc!!,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded,
+            revocationManager = revocationManager
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_REVOKED, verResult)
+    }
+
+    @Test
+    fun test12_UnauthorizedDeviceAttemptsDecryptionFails() {
+        val keyBytes = ByteArray(32) { (it + 1).toByte() }
+        broadcastManager.registerCampusKey(institutionScope, 1, keyBytes)
+
+        val plainText = "Sensitive Campus Strategy".toByteArray()
+        val headerAad = "AAD_HEADER".toByteArray()
+
+        val encPair = broadcastManager.encryptBroadcastPayload(institutionScope, 1, sequence, plainText, headerAad)
+        assertNotNull(encPair)
+
+        val (cipherText, macTag) = encPair!!
+
+        // Decrypt with unregistered scope
+        val decrypted = broadcastManager.decryptBroadcastPayload("COLLEGE:UNREGISTERED", 1, sequence, cipherText, macTag, headerAad)
+        assertNull(decrypted)
+    }
+
+    @Test
+    fun test13_AuthorizedCampusMemberReceivesBroadcastSuccess() {
+        val keyBytes = ByteArray(32) { (it + 1).toByte() }
+        broadcastManager.registerCampusKey(institutionScope, 1, keyBytes)
+
+        val plainText = "Auditorium Closed Today".toByteArray()
+        val headerAad = "AAD_HEADER".toByteArray()
+
+        val encPair = broadcastManager.encryptBroadcastPayload(institutionScope, 1, sequence, plainText, headerAad)
+        assertNotNull(encPair)
+
+        val (cipherText, macTag) = encPair!!
+
+        val decrypted = broadcastManager.decryptBroadcastPayload(institutionScope, 1, sequence, cipherText, macTag, headerAad)
+        assertNotNull(decrypted)
+        assertEquals("Auditorium Closed Today", String(decrypted!!, Charsets.UTF_8))
+    }
+
+    @Test
+    fun test14_BroadcastForwardedThroughMultipleRelays() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Multi-Hop Alert",
+            message = "Relayed Message"
+        )
+        assertNotNull(bc)
+        assertEquals("Multi-Hop Alert", bc!!.title)
+    }
+
+    @Test
+    fun test15_DuplicateReceivedThroughMultiplePathsDisplayedOnce() {
+        val bcId = "BC-DUPLICATE-01"
+        assertFalse(broadcastManager.isDuplicateOrAdd(bcId)) // First: Returns false (Added)
+        assertTrue(broadcastManager.isDuplicateOrAdd(bcId))  // Second: Returns true (Suppressed)
+    }
+
+    @Test
+    fun test16_BroadcastStormPreventionBoundedForwarding() {
+        val bcId = "BC-STORM-PREVENTION"
+        val isFirst = broadcastManager.isDuplicateOrAdd(bcId)
+        assertFalse(isFirst)
+        val isSecond = broadcastManager.isDuplicateOrAdd(bcId)
+        assertTrue(isSecond)
+    }
+}

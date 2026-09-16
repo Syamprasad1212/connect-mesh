@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="received_cache" path="received/" />
+    <files-path name="received_files" path="received/" />
+    <files-path name="downloads" path="downloads/" />
+    <cache-path name="transfers" path="transfers/" />
+    <external-files-path name="ext_downloads" path="." />
+</paths>
