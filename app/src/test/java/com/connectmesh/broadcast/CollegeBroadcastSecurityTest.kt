@@ -371,4 +371,74 @@ class CollegeBroadcastSecurityTest {
         val isSecond = broadcastManager.isDuplicateOrAdd(bcId)
         assertTrue(isSecond)
     }
+
+    @Test
+    fun test17_WirePayloadSerializationAndDeserialization() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Campus Wire Test",
+            message = "Serialization payload check"
+        )
+        assertNotNull(bc)
+
+        val wireBytes = bc!!.toWirePayload()
+        val decoded = CollegeBroadcast.fromWirePayload(wireBytes)
+
+        assertNotNull(decoded)
+        assertEquals(bc.broadcastId, decoded!!.broadcastId)
+        assertEquals(bc.institutionScope, decoded.institutionScope)
+        assertEquals(bc.senderConnectMeshId, decoded.senderConnectMeshId)
+        assertEquals(bc.signatureHex, decoded.signatureHex)
+        assertEquals(bc.title, decoded.title)
+        assertEquals(bc.message, decoded.message)
+    }
+
+    @Test
+    fun test18_ForgedBroadcastWithoutValidSignatureRejected() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Official Alert",
+            message = "Real Message"
+        )
+        assertNotNull(bc)
+
+        // Forger alters message text without valid private key
+        val forgedBc = bc!!.copy(message = "FORGED FAKE ANNOUNCEMENT")
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = forgedBc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, verResult)
+    }
+
+    @Test
+    fun test19_CampusMessageIsNotClassroomMsgOrSos() {
+        val bcType = com.connectmesh.protocol.PacketType.COLLEGE_BROADCAST
+        val classType = com.connectmesh.protocol.PacketType.CLASSROOM_MSG
+        val sosType = com.connectmesh.protocol.PacketType.SOS
+
+        assertNotEquals(bcType, classType)
+        assertNotEquals(bcType, sosType)
+        assertEquals(0x15.toByte(), bcType.code)
+        assertEquals(0x13.toByte(), classType.code)
+        assertEquals(0x08.toByte(), sosType.code)
+    }
+
+    @Test
+    fun test20_DirectChatVoiceAndFileProtocolsPreserved() {
+        val msgType = com.connectmesh.protocol.PacketType.MESSAGE
+        val voiceType = com.connectmesh.protocol.PacketType.VOICE_FRAGMENT
+        val fileStartType = com.connectmesh.protocol.PacketType.FILE_START
+
+        assertEquals(0x02.toByte(), msgType.code)
+        assertEquals(0x05.toByte(), voiceType.code)
+        assertEquals(0x0A.toByte(), fileStartType.code)
+    }
 }

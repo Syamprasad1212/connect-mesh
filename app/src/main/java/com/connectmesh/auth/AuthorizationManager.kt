@@ -26,6 +26,8 @@ class AuthorizationManager(
         NetworkEventLogger.log("CONNECT_MESH_AUTH: TRUSTED_ISSUER_REGISTERED id=0x${issuerId.toString(16).uppercase()}")
     }
 
+    fun getTrustedIssuerKey(issuerId: Long): ByteArray? = trustedIssuers[issuerId]
+
     fun setLocalCredential(credential: RoleCredential) {
         if (localPublicKeyBytes == null) {
             NetworkEventLogger.log("CONNECT_MESH_AUTH: ERROR - local identity not initialized before setting credential")

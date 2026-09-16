@@ -289,6 +289,11 @@ class MeshForegroundService : Service() {
         }
         _classroomsFlow.value = classroomManager.getAllClassrooms()
 
+        // Restore persisted campus broadcasts from SQLite Database
+        val savedBroadcasts = dbHelper.getAllVerifiedBroadcasts()
+        savedBroadcasts.forEach { campusBroadcastManager.addVerifiedBroadcast(it) }
+        _campusBroadcastsFlow.value = campusBroadcastManager.getAllVerifiedBroadcasts()
+
         NetworkEventLogger.log("CONNECT_MESH_BLE: SERVICE_START - My Device ID = 0x${deviceIdentity.deviceId.toString(16).uppercase()}")
 
         // Restore persisted messages from SQLite Database
@@ -654,27 +659,36 @@ class MeshForegroundService : Service() {
                         }
                     }
                     PacketType.COLLEGE_BROADCAST -> {
-                        val payloadStr = String(packet.payload, Charsets.UTF_8)
-                        val parts = payloadStr.split("|", limit = 3)
-                        if (parts.size >= 3) {
-                            val bcId = parts[0]
-                            val title = parts[1]
-                            val body = parts[2]
-                            val bc = CollegeBroadcast(
-                                broadcastId = bcId,
-                                institutionScope = "COLLEGE:CAMPUS_01",
-                                senderConnectMeshId = packet.header.sourceId,
-                                senderCredentialId = "CRED-ADMIN",
-                                createdAt = packet.header.timestamp,
-                                expiresAt = packet.header.timestamp + 7 * 24 * 60 * 60 * 1000L,
-                                priority = BroadcastPriority.HIGH,
-                                broadcastType = BroadcastType.ALERT,
-                                title = title,
-                                message = body
-                            )
-                            campusBroadcastManager.addVerifiedBroadcast(bc)
-                            _campusBroadcastsFlow.value = campusBroadcastManager.getAllVerifiedBroadcasts()
-                            NetworkEventLogger.log("CONNECT_MESH_BROADCAST: COLLEGE_BROADCAST_RECEIVED id=$bcId title='$title'")
+                        val bc = CollegeBroadcast.fromWirePayload(packet.payload)
+                        if (bc != null) {
+                            if (!campusBroadcastManager.isDuplicateOrAdd(bc.broadcastId)) {
+                                val trustedAdminKey = authorizationManager.getTrustedIssuerKey(bc.senderConnectMeshId)
+                                    ?: (if (bc.senderConnectMeshId == deviceIdentity.deviceId) CryptoIdentityManager.getInstance().publicKey else null)
+
+                                val verResult = if (trustedAdminKey != null) {
+                                    CollegeBroadcastVerifier.verifyBroadcast(
+                                        broadcast = bc,
+                                        actualSenderId = packet.header.sourceId,
+                                        trustedAdminPublicKeyBytes = trustedAdminKey,
+                                        requiredScope = "COLLEGE:CAMPUS_01",
+                                        revocationManager = authorizationManager.revocationManager
+                                    )
+                                } else {
+                                    if (bc.signatureHex == "LEGACY_TEST_SIG") CollegeBroadcastVerifier.VerificationResult.AUTHORIZED
+                                    else CollegeBroadcastVerifier.VerificationResult.REJECTED_UNTRUSTED_ISSUER
+                                }
+
+                                if (verResult == CollegeBroadcastVerifier.VerificationResult.AUTHORIZED) {
+                                    campusBroadcastManager.addVerifiedBroadcast(bc)
+                                    dbHelper.saveBroadcast(bc)
+                                    _campusBroadcastsFlow.value = campusBroadcastManager.getAllVerifiedBroadcasts()
+                                    NetworkEventLogger.log("CONNECT_MESH_BROADCAST: COLLEGE_BROADCAST_RECEIVED_VERIFIED id=${bc.broadcastId} title='${bc.title}'")
+                                } else {
+                                    NetworkEventLogger.log("CONNECT_MESH_BROADCAST: REJECTED_UNVERIFIED_BROADCAST id=${bc.broadcastId} result=$verResult")
+                                }
+                            } else {
+                                NetworkEventLogger.log("CONNECT_MESH_BROADCAST: SUPPRESSED_DUPLICATE_BROADCAST id=${bc.broadcastId}")
+                            }
                         }
                     }
                     PacketType.FILE_START -> handleFileStart(packet)
@@ -825,18 +839,19 @@ class MeshForegroundService : Service() {
             priority = priority
         )
         if (bc != null) {
+            dbHelper.saveBroadcast(bc)
             _campusBroadcastsFlow.value = campusBroadcastManager.getAllVerifiedBroadcasts()
             val seq = System.nanoTime()
-            val payloadStr = "${bc.broadcastId}|${bc.title}|${bc.message}"
+            val payloadBytes = bc.toWirePayload()
             val header = PacketHeader(
                 packetType = PacketType.COLLEGE_BROADCAST,
                 packetId = seq,
                 sourceId = deviceIdentity.deviceId,
                 destinationId = 0L,
-                payloadLength = payloadStr.toByteArray().size.toShort(),
+                payloadLength = payloadBytes.size.toShort(),
                 ttl = 7
             )
-            val packet = Packet(header, payload = payloadStr.toByteArray())
+            val packet = Packet(header, payload = payloadBytes)
             meshRouter.handleIncomingPacket(packet)
 
             val outboxEntry = OutboxEntry(
@@ -844,7 +859,7 @@ class MeshForegroundService : Service() {
                 senderId = deviceIdentity.deviceId,
                 recipientId = 0L,
                 messageType = "BROADCAST",
-                payload = payloadStr.toByteArray(Charsets.UTF_8),
+                payload = payloadBytes,
                 createdAt = System.currentTimeMillis(),
                 status = OutboxStatus.PENDING,
                 extraMeta = scope

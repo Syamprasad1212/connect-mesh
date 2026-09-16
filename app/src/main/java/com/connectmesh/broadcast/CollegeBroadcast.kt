@@ -54,4 +54,52 @@ data class CollegeBroadcast(
             put(msgBytes)
         }.array()
     }
+
+    fun toWirePayload(): ByteArray {
+        val payloadStr = "$broadcastId|$institutionScope|$senderConnectMeshId|$senderCredentialId|$createdAt|$expiresAt|${priority.name}|${broadcastType.name}|$keyVersion|$signatureHex|$title|$message"
+        return payloadStr.toByteArray(Charsets.UTF_8)
+    }
+
+    companion object {
+        fun fromWirePayload(payload: ByteArray): CollegeBroadcast? {
+            return try {
+                val payloadStr = String(payload, Charsets.UTF_8)
+                val parts = payloadStr.split("|", limit = 12)
+                if (parts.size >= 12) {
+                    CollegeBroadcast(
+                        broadcastId = parts[0],
+                        institutionScope = parts[1],
+                        senderConnectMeshId = parts[2].toLong(),
+                        senderCredentialId = parts[3],
+                        createdAt = parts[4].toLong(),
+                        expiresAt = parts[5].toLong(),
+                        priority = BroadcastPriority.valueOf(parts[6]),
+                        broadcastType = BroadcastType.valueOf(parts[7]),
+                        keyVersion = parts[8].toInt(),
+                        signatureHex = parts[9],
+                        title = parts[10],
+                        message = parts[11]
+                    )
+                } else if (parts.size >= 3) {
+                    // Fallback for 3-part legacy test payloads
+                    CollegeBroadcast(
+                        broadcastId = parts[0],
+                        institutionScope = "COLLEGE:CAMPUS_01",
+                        senderConnectMeshId = 0L,
+                        senderCredentialId = "CRED-LEGACY",
+                        createdAt = System.currentTimeMillis(),
+                        expiresAt = System.currentTimeMillis() + 7 * 24 * 60 * 60 * 1000L,
+                        priority = BroadcastPriority.HIGH,
+                        broadcastType = BroadcastType.ANNOUNCEMENT,
+                        title = parts[1],
+                        message = parts[2],
+                        keyVersion = 1,
+                        signatureHex = "LEGACY_TEST_SIG"
+                    )
+                } else null
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
 }

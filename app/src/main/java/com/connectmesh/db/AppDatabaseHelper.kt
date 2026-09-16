@@ -4,6 +4,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.connectmesh.broadcast.BroadcastPriority
+import com.connectmesh.broadcast.BroadcastType
+import com.connectmesh.broadcast.CollegeBroadcast
 import com.connectmesh.classroom.ClassroomGroup
 import com.connectmesh.file.FileManager
 import com.connectmesh.service.MeshForegroundService.ChatMessage
@@ -50,7 +53,7 @@ class AppDatabaseHelper(private val context: Context) :
 
     companion object {
         private const val DATABASE_NAME = "connect_mesh.db"
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4
 
         private const val TABLE_MESSAGES = "messages"
         private const val COLUMN_ID = "id"
@@ -93,6 +96,20 @@ class AppDatabaseHelper(private val context: Context) :
         private const val COLUMN_CREATED_AT = "created_at"
         private const val COLUMN_KEY_VERSION = "group_key_version"
         private const val COLUMN_ACTIVE_KEY_HEX = "active_group_key_hex"
+
+        private const val TABLE_BROADCASTS = "broadcasts"
+        private const val COLUMN_BC_ID = "broadcast_id"
+        private const val COLUMN_BC_SCOPE = "institution_scope"
+        private const val COLUMN_BC_SENDER_ID = "sender_id"
+        private const val COLUMN_BC_SENDER_CRED_ID = "sender_cred_id"
+        private const val COLUMN_BC_CREATED_AT = "created_at"
+        private const val COLUMN_BC_EXPIRES_AT = "expires_at"
+        private const val COLUMN_BC_PRIORITY = "priority"
+        private const val COLUMN_BC_TYPE = "broadcast_type"
+        private const val COLUMN_BC_TITLE = "title"
+        private const val COLUMN_BC_MESSAGE = "message"
+        private const val COLUMN_BC_KEY_VERSION = "key_version"
+        private const val COLUMN_BC_SIGNATURE_HEX = "signature_hex"
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -120,6 +137,7 @@ class AppDatabaseHelper(private val context: Context) :
         db.execSQL(createMessagesTable)
         createOutboxTable(db)
         createClassroomsTable(db)
+        createBroadcastsTable(db)
     }
 
     private fun createOutboxTable(db: SQLiteDatabase) {
@@ -157,12 +175,35 @@ class AppDatabaseHelper(private val context: Context) :
         db.execSQL(createClassroomsTable)
     }
 
+    private fun createBroadcastsTable(db: SQLiteDatabase) {
+        val createBroadcastsTable = """
+            CREATE TABLE IF NOT EXISTS $TABLE_BROADCASTS (
+                $COLUMN_BC_ID TEXT PRIMARY KEY,
+                $COLUMN_BC_SCOPE TEXT NOT NULL,
+                $COLUMN_BC_SENDER_ID INTEGER NOT NULL,
+                $COLUMN_BC_SENDER_CRED_ID TEXT NOT NULL,
+                $COLUMN_BC_CREATED_AT INTEGER NOT NULL,
+                $COLUMN_BC_EXPIRES_AT INTEGER NOT NULL,
+                $COLUMN_BC_PRIORITY TEXT NOT NULL,
+                $COLUMN_BC_TYPE TEXT NOT NULL,
+                $COLUMN_BC_TITLE TEXT NOT NULL,
+                $COLUMN_BC_MESSAGE TEXT NOT NULL,
+                $COLUMN_BC_KEY_VERSION INTEGER NOT NULL,
+                $COLUMN_BC_SIGNATURE_HEX TEXT NOT NULL
+            )
+        """.trimIndent()
+        db.execSQL(createBroadcastsTable)
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             createOutboxTable(db)
         }
         if (oldVersion < 3) {
             createClassroomsTable(db)
+        }
+        if (oldVersion < 4) {
+            createBroadcastsTable(db)
         }
     }
 
@@ -440,5 +481,78 @@ class AppDatabaseHelper(private val context: Context) :
             }
         }
         return classrooms
+    }
+
+    // --- PERSISTENT CAMPUS BROADCAST OPERATIONS ---
+
+    fun saveBroadcast(bc: CollegeBroadcast) {
+        val db = writableDatabase
+        val values = ContentValues().apply {
+            put(COLUMN_BC_ID, bc.broadcastId)
+            put(COLUMN_BC_SCOPE, bc.institutionScope)
+            put(COLUMN_BC_SENDER_ID, bc.senderConnectMeshId)
+            put(COLUMN_BC_SENDER_CRED_ID, bc.senderCredentialId)
+            put(COLUMN_BC_CREATED_AT, bc.createdAt)
+            put(COLUMN_BC_EXPIRES_AT, bc.expiresAt)
+            put(COLUMN_BC_PRIORITY, bc.priority.name)
+            put(COLUMN_BC_TYPE, bc.broadcastType.name)
+            put(COLUMN_BC_TITLE, bc.title)
+            put(COLUMN_BC_MESSAGE, bc.message)
+            put(COLUMN_BC_KEY_VERSION, bc.keyVersion)
+            put(COLUMN_BC_SIGNATURE_HEX, bc.signatureHex)
+        }
+        db.insertWithOnConflict(TABLE_BROADCASTS, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getAllVerifiedBroadcasts(): List<CollegeBroadcast> {
+        val broadcasts = mutableListOf<CollegeBroadcast>()
+        val db = readableDatabase
+        val now = System.currentTimeMillis()
+        val cursor = db.query(
+            TABLE_BROADCASTS,
+            null,
+            "$COLUMN_BC_EXPIRES_AT > ?",
+            arrayOf(now.toString()),
+            null,
+            null,
+            "$COLUMN_BC_CREATED_AT DESC"
+        )
+
+        cursor.use { c ->
+            while (c.moveToNext()) {
+                val bcId = c.getString(c.getColumnIndexOrThrow(COLUMN_BC_ID))
+                val scope = c.getString(c.getColumnIndexOrThrow(COLUMN_BC_SCOPE))
+                val senderId = c.getLong(c.getColumnIndexOrThrow(COLUMN_BC_SENDER_ID))
+                val credId = c.getString(c.getColumnIndexOrThrow(COLUMN_BC_SENDER_CRED_ID))
+                val createdAt = c.getLong(c.getColumnIndexOrThrow(COLUMN_BC_CREATED_AT))
+                val expiresAt = c.getLong(c.getColumnIndexOrThrow(COLUMN_BC_EXPIRES_AT))
+                val priorityStr = c.getString(c.getColumnIndexOrThrow(COLUMN_BC_PRIORITY)) ?: "NORMAL"
+                val priority = try { BroadcastPriority.valueOf(priorityStr) } catch (e: Exception) { BroadcastPriority.NORMAL }
+                val typeStr = c.getString(c.getColumnIndexOrThrow(COLUMN_BC_TYPE)) ?: "ANNOUNCEMENT"
+                val broadcastType = try { BroadcastType.valueOf(typeStr) } catch (e: Exception) { BroadcastType.ANNOUNCEMENT }
+                val title = c.getString(c.getColumnIndexOrThrow(COLUMN_BC_TITLE)) ?: ""
+                val message = c.getString(c.getColumnIndexOrThrow(COLUMN_BC_MESSAGE)) ?: ""
+                val keyVersion = c.getInt(c.getColumnIndexOrThrow(COLUMN_BC_KEY_VERSION))
+                val signatureHex = c.getString(c.getColumnIndexOrThrow(COLUMN_BC_SIGNATURE_HEX)) ?: ""
+
+                broadcasts.add(
+                    CollegeBroadcast(
+                        broadcastId = bcId,
+                        institutionScope = scope,
+                        senderConnectMeshId = senderId,
+                        senderCredentialId = credId,
+                        createdAt = createdAt,
+                        expiresAt = expiresAt,
+                        priority = priority,
+                        broadcastType = broadcastType,
+                        title = title,
+                        message = message,
+                        keyVersion = keyVersion,
+                        signatureHex = signatureHex
+                    )
+                )
+            }
+        }
+        return broadcasts
     }
 }
