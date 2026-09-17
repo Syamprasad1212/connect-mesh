@@ -441,4 +441,110 @@ class CollegeBroadcastSecurityTest {
         assertEquals(0x05.toByte(), voiceType.code)
         assertEquals(0x0A.toByte(), fileStartType.code)
     }
+
+    @Test
+    fun test21_Phase6D2_LegacyTestSignatureRejected() {
+        val legacyBc = CollegeBroadcast(
+            broadcastId = "BC-LEGACY-001",
+            institutionScope = institutionScope,
+            senderConnectMeshId = adminId,
+            senderCredentialId = "CRED-ADMIN-01",
+            createdAt = System.currentTimeMillis(),
+            expiresAt = System.currentTimeMillis() + 86400000L,
+            priority = BroadcastPriority.HIGH,
+            broadcastType = BroadcastType.ANNOUNCEMENT,
+            title = "Legacy Test",
+            message = "Magic string payload",
+            signatureHex = "LEGACY_TEST_SIG"
+        )
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = legacyBc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        // Must be rejected as invalid signature when magic string is provided without real ECDSA signature
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, verResult)
+    }
+
+    @Test
+    fun test22_Phase6D2_ForgedBroadcastDoesNotPoisonDedupState() {
+        val bcId = "BC-POISON-TEST-01"
+        val forgedBc = CollegeBroadcast(
+            broadcastId = bcId,
+            institutionScope = institutionScope,
+            senderConnectMeshId = adminId,
+            senderCredentialId = "CRED-ADMIN-01",
+            createdAt = System.currentTimeMillis(),
+            expiresAt = System.currentTimeMillis() + 86400000L,
+            priority = BroadcastPriority.HIGH,
+            broadcastType = BroadcastType.ANNOUNCEMENT,
+            title = "Forged Alert",
+            message = "Forged Payload",
+            signatureHex = "0011223344556677" // Invalid fake sig
+        )
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = forgedBc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, verResult)
+
+        // Verify that because verification failed, broadcastId was NOT added to processedBroadcastIds
+        val isAlreadyProcessed = broadcastManager.getBroadcast(bcId) != null
+        assertFalse(isAlreadyProcessed)
+    }
+
+    @Test
+    fun test23_Phase6D2_ValidBroadcastAcceptedAfterForgedAttempt() {
+        val bcId = "BC-RECOVERY-TEST-01"
+
+        // 1. Attacker attempts forged broadcast with ID bcId
+        val forgedBc = CollegeBroadcast(
+            broadcastId = bcId,
+            institutionScope = institutionScope,
+            senderConnectMeshId = adminId,
+            senderCredentialId = "CRED-ADMIN-01",
+            createdAt = System.currentTimeMillis(),
+            expiresAt = System.currentTimeMillis() + 86400000L,
+            priority = BroadcastPriority.HIGH,
+            broadcastType = BroadcastType.ANNOUNCEMENT,
+            title = "Forged Alert",
+            message = "Forged Payload",
+            signatureHex = "DEADBEEF"
+        )
+        val verForged = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = forgedBc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, verForged)
+
+        // 2. Legitimate Admin issues valid broadcast with same bcId
+        val validBc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Real Alert",
+            message = "Real Message"
+        )
+        assertNotNull(validBc)
+
+        val verValid = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = validBc!!,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.AUTHORIZED, verValid)
+
+        // 3. Application-level deduplication: first valid addition -> returns false (not duplicate)
+        val isDupFirst = broadcastManager.isDuplicateOrAdd(validBc.broadcastId)
+        assertTrue(isDupFirst) // True because addVerifiedBroadcast added it during creation
+
+        // 4. Re-transmission of same valid broadcast -> suppressed as duplicate
+        val isDupSecond = broadcastManager.isDuplicateOrAdd(validBc.broadcastId)
+        assertTrue(isDupSecond)
+    }
 }

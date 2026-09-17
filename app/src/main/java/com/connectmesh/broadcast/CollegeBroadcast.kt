@@ -80,22 +80,6 @@ data class CollegeBroadcast(
                         title = parts[10],
                         message = parts[11]
                     )
-                } else if (parts.size >= 3) {
-                    // Fallback for 3-part legacy test payloads
-                    CollegeBroadcast(
-                        broadcastId = parts[0],
-                        institutionScope = "COLLEGE:CAMPUS_01",
-                        senderConnectMeshId = 0L,
-                        senderCredentialId = "CRED-LEGACY",
-                        createdAt = System.currentTimeMillis(),
-                        expiresAt = System.currentTimeMillis() + 7 * 24 * 60 * 60 * 1000L,
-                        priority = BroadcastPriority.HIGH,
-                        broadcastType = BroadcastType.ANNOUNCEMENT,
-                        title = parts[1],
-                        message = parts[2],
-                        keyVersion = 1,
-                        signatureHex = "LEGACY_TEST_SIG"
-                    )
                 } else null
             } catch (e: Exception) {
                 null

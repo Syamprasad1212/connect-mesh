@@ -661,33 +661,32 @@ class MeshForegroundService : Service() {
                     PacketType.COLLEGE_BROADCAST -> {
                         val bc = CollegeBroadcast.fromWirePayload(packet.payload)
                         if (bc != null) {
-                            if (!campusBroadcastManager.isDuplicateOrAdd(bc.broadcastId)) {
-                                val trustedAdminKey = authorizationManager.getTrustedIssuerKey(bc.senderConnectMeshId)
-                                    ?: (if (bc.senderConnectMeshId == deviceIdentity.deviceId) CryptoIdentityManager.getInstance().publicKey else null)
+                            val trustedAdminKey = authorizationManager.getTrustedIssuerKey(bc.senderConnectMeshId)
+                                ?: (if (bc.senderConnectMeshId == deviceIdentity.deviceId) CryptoIdentityManager.getInstance().publicKey else null)
 
-                                val verResult = if (trustedAdminKey != null) {
-                                    CollegeBroadcastVerifier.verifyBroadcast(
-                                        broadcast = bc,
-                                        actualSenderId = packet.header.sourceId,
-                                        trustedAdminPublicKeyBytes = trustedAdminKey,
-                                        requiredScope = "COLLEGE:CAMPUS_01",
-                                        revocationManager = authorizationManager.revocationManager
-                                    )
-                                } else {
-                                    if (bc.signatureHex == "LEGACY_TEST_SIG") CollegeBroadcastVerifier.VerificationResult.AUTHORIZED
-                                    else CollegeBroadcastVerifier.VerificationResult.REJECTED_UNTRUSTED_ISSUER
-                                }
+                            val verResult = if (trustedAdminKey != null) {
+                                CollegeBroadcastVerifier.verifyBroadcast(
+                                    broadcast = bc,
+                                    actualSenderId = packet.header.sourceId,
+                                    trustedAdminPublicKeyBytes = trustedAdminKey,
+                                    requiredScope = "COLLEGE:CAMPUS_01",
+                                    revocationManager = authorizationManager.revocationManager
+                                )
+                            } else {
+                                CollegeBroadcastVerifier.VerificationResult.REJECTED_UNTRUSTED_ISSUER
+                            }
 
-                                if (verResult == CollegeBroadcastVerifier.VerificationResult.AUTHORIZED) {
+                            if (verResult == CollegeBroadcastVerifier.VerificationResult.AUTHORIZED) {
+                                if (!campusBroadcastManager.isDuplicateOrAdd(bc.broadcastId)) {
                                     campusBroadcastManager.addVerifiedBroadcast(bc)
                                     dbHelper.saveBroadcast(bc)
                                     _campusBroadcastsFlow.value = campusBroadcastManager.getAllVerifiedBroadcasts()
                                     NetworkEventLogger.log("CONNECT_MESH_BROADCAST: COLLEGE_BROADCAST_RECEIVED_VERIFIED id=${bc.broadcastId} title='${bc.title}'")
                                 } else {
-                                    NetworkEventLogger.log("CONNECT_MESH_BROADCAST: REJECTED_UNVERIFIED_BROADCAST id=${bc.broadcastId} result=$verResult")
+                                    NetworkEventLogger.log("CONNECT_MESH_BROADCAST: SUPPRESSED_DUPLICATE_BROADCAST id=${bc.broadcastId}")
                                 }
                             } else {
-                                NetworkEventLogger.log("CONNECT_MESH_BROADCAST: SUPPRESSED_DUPLICATE_BROADCAST id=${bc.broadcastId}")
+                                NetworkEventLogger.log("CONNECT_MESH_BROADCAST: REJECTED_UNVERIFIED_BROADCAST id=${bc.broadcastId} result=$verResult")
                             }
                         }
                     }
