@@ -79,13 +79,24 @@ object CollegeBroadcastVerifier {
         return VerificationResult.AUTHORIZED
     }
 
-    private fun isScopeCompatible(broadcastScope: String, requiredScope: String): Boolean {
+    fun isScopeCompatible(broadcastScope: String, requiredScope: String): Boolean {
         if (broadcastScope == "*" || broadcastScope.equals(requiredScope, ignoreCase = true)) return true
         if (broadcastScope.endsWith(":*")) {
             val prefix = broadcastScope.substringBefore(":*")
             return requiredScope.startsWith(prefix, ignoreCase = true)
         }
-        return false
+        return isCampusScopeMatching(broadcastScope, requiredScope)
+    }
+
+    fun isCampusScopeMatching(broadcastScope: String, enrolledScope: String?): Boolean {
+        if (enrolledScope.isNullOrBlank()) return false
+        val bScope = broadcastScope.trim()
+        val eScope = enrolledScope.trim()
+        if (bScope.equals(eScope, ignoreCase = true) || bScope == "*" || eScope == "*") return true
+
+        val bClean = if (bScope.contains(":")) bScope.substringAfter(":") else bScope
+        val eClean = if (eScope.contains(":")) eScope.substringAfter(":") else eScope
+        return bClean.equals(eClean, ignoreCase = true)
     }
 
     private fun verifyEcdsaSignature(signableBytes: ByteArray, signatureHex: String, publicKeyBytes: ByteArray): Boolean {

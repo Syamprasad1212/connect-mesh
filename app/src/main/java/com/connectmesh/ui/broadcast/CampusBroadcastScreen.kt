@@ -27,9 +27,10 @@ import java.util.*
 @Composable
 fun CampusBroadcastScreen(
     broadcasts: List<CollegeBroadcast>,
+    enrolledCampusScope: String? = "COLLEGE:CAMPUS_01",
     canCreateBroadcast: Boolean,
     onCreateBroadcast: (title: String, message: String, priority: BroadcastPriority) -> Unit,
-    onRegisterTrustIssuer: ((issuerId: String, publicKey: String) -> Boolean)? = null
+    onRegisterTrustIssuer: ((issuerId: String, publicKey: String, campusScope: String) -> Boolean)? = null
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
     var showTrustDialog by remember { mutableStateOf(false) }
@@ -37,6 +38,7 @@ fun CampusBroadcastScreen(
     var messageInput by remember { mutableStateOf("") }
     var selectedPriority by remember { mutableStateOf(BroadcastPriority.NORMAL) }
 
+    var campusScopeInput by remember(enrolledCampusScope) { mutableStateOf(enrolledCampusScope?.removePrefix("COLLEGE:") ?: "CAMPUS_01") }
     var issuerIdInput by remember { mutableStateOf("") }
     var publicKeyInput by remember { mutableStateOf("") }
     var trustErrorMessage by remember { mutableStateOf<String?>(null) }
@@ -53,7 +55,7 @@ fun CampusBroadcastScreen(
                 actions = {
                     if (onRegisterTrustIssuer != null) {
                         IconButton(onClick = { showTrustDialog = true }) {
-                            Icon(Icons.Default.VerifiedUser, contentDescription = "Campus Trust Setup", tint = AppPrimaryAccent)
+                            Icon(Icons.Default.School, contentDescription = "Campus Setup", tint = AppPrimaryAccent)
                         }
                     }
                     if (canCreateBroadcast) {
@@ -117,6 +119,45 @@ fun CampusBroadcastScreen(
                         .padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    item {
+                        Surface(
+                            color = if (enrolledCampusScope != null) AppSuccessGreen.copy(alpha = 0.15f) else AppEmergencyRed.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Default.School,
+                                        contentDescription = null,
+                                        tint = if (enrolledCampusScope != null) AppSuccessGreen else AppEmergencyRed,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        if (enrolledCampusScope != null) "✓ ENROLLED CAMPUS: ${enrolledCampusScope.removePrefix("COLLEGE:")}" else "CAMPUS NOT ENROLLED",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = if (enrolledCampusScope != null) AppSuccessGreen else AppEmergencyRed
+                                    )
+                                }
+                                if (onRegisterTrustIssuer != null) {
+                                    TextButton(
+                                        onClick = { showTrustDialog = true },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                    ) {
+                                        Text("Campus Setup", fontSize = 11.sp, color = AppPrimaryAccent, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     item {
                         Text(
                             "VERIFIED INSTITUTIONAL ALERTS",
@@ -273,19 +314,27 @@ fun CampusBroadcastScreen(
                         trustErrorMessage = null
                         trustSuccessMessage = null
                     },
-                    title = { Text("Campus Trust Anchor Setup", fontWeight = FontWeight.Bold) },
+                    title = { Text("Campus Setup", fontWeight = FontWeight.Bold) },
                     text = {
                         Column {
                             Text(
-                                "Enroll trusted campus authority ID and EC P-256 public key (Base64 or Hex) to verify offline campus broadcasts.",
+                                "Enroll this device into a campus to receive official verified announcements offline.",
                                 fontSize = 12.sp,
                                 color = AppTextSecondary
                             )
                             Spacer(modifier = Modifier.height(10.dp))
                             OutlinedTextField(
+                                value = campusScopeInput,
+                                onValueChange = { campusScopeInput = it; trustErrorMessage = null },
+                                label = { Text("Campus Scope (e.g. CAMPUS_01)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
                                 value = issuerIdInput,
                                 onValueChange = { issuerIdInput = it; trustErrorMessage = null },
-                                label = { Text("Campus Issuer ID (Hex or Dec)") },
+                                label = { Text("Campus Authority ID (Hex or Dec)") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
@@ -293,7 +342,7 @@ fun CampusBroadcastScreen(
                             OutlinedTextField(
                                 value = publicKeyInput,
                                 onValueChange = { publicKeyInput = it; trustErrorMessage = null },
-                                label = { Text("Issuer Public Key (Base64 / Hex)") },
+                                label = { Text("Campus Authority Key (Base64 / Hex)") },
                                 modifier = Modifier.fillMaxWidth(),
                                 minLines = 2
                             )
@@ -311,15 +360,15 @@ fun CampusBroadcastScreen(
                     confirmButton = {
                         Button(
                             onClick = {
-                                if (issuerIdInput.isNotBlank() && publicKeyInput.isNotBlank()) {
-                                    val success = onRegisterTrustIssuer(issuerIdInput, publicKeyInput)
+                                if (issuerIdInput.isNotBlank() && publicKeyInput.isNotBlank() && campusScopeInput.isNotBlank()) {
+                                    val success = onRegisterTrustIssuer(issuerIdInput, publicKeyInput, campusScopeInput)
                                     if (success) {
-                                        trustSuccessMessage = "Campus Issuer Enrolled Successfully!"
+                                        trustSuccessMessage = "Enrolled in ${campusScopeInput.trim().uppercase()} Successfully!"
                                         trustErrorMessage = null
                                         issuerIdInput = ""
                                         publicKeyInput = ""
                                     } else {
-                                        trustErrorMessage = "Invalid Public Key format or ID"
+                                        trustErrorMessage = "Invalid Key format or ID"
                                         trustSuccessMessage = null
                                     }
                                 } else {
@@ -328,7 +377,7 @@ fun CampusBroadcastScreen(
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = AppPrimaryAccent)
                         ) {
-                            Text("Enroll Trust Anchor")
+                            Text("Enroll Campus")
                         }
                     },
                     dismissButton = {

@@ -321,16 +321,17 @@ fun ConnectMeshApp(
                                 val broadcasts by service.campusBroadcastsFlow.collectAsState()
                                 CampusBroadcastScreen(
                                     broadcasts = broadcasts,
+                                    enrolledCampusScope = service.enrolledCampusScope,
                                     canCreateBroadcast = service.authorizationManager.hasRole(com.connectmesh.auth.UserRole.ADMIN),
                                     onCreateBroadcast = { title, msg, priority ->
                                         service.createCampusBroadcast(title, msg, priority)
                                     },
-                                    onRegisterTrustIssuer = { issuerIdStr, pubKeyStr ->
+                                    onRegisterTrustIssuer = { issuerIdStr, pubKeyStr, scopeStr ->
                                         val cleanIdStr = issuerIdStr.trim().removePrefix("0x").removePrefix("0X")
                                         val issuerId = cleanIdStr.toLongOrNull(16)
                                             ?: cleanIdStr.toLongOrNull()
                                             ?: 0L
-                                        service.registerTrustedCampusIssuer(issuerId, pubKeyStr)
+                                        service.registerTrustedCampusIssuer(issuerId, pubKeyStr, scopeStr)
                                     }
                                 )
                             }

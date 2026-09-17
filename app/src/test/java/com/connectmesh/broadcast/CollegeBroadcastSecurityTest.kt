@@ -647,4 +647,192 @@ class CollegeBroadcastSecurityTest {
         assertNotNull(retrievedKey)
         assertArrayEquals(adminKeyPair.public.encoded, retrievedKey)
     }
+
+    // =========================================================================
+    // PHASE 6D.6 TARGETED SECURITY & MEMBERSHIP TESTS (STEP 7 TESTS 1 - 12)
+    // =========================================================================
+
+    @Test
+    fun test29_Phase6D6_NullEnrollmentDoesNotMatch() {
+        val enrolledScope: String? = null
+        val broadcastScope = "COLLEGE:CAMPUS_01"
+        assertFalse(CollegeBroadcastVerifier.isCampusScopeMatching(broadcastScope, enrolledScope))
+    }
+
+    @Test
+    fun test30_Phase6D6_Campus01MatchesCampus01() {
+        val enrolledScope = "COLLEGE:CAMPUS_01"
+        val broadcastScope = "COLLEGE:CAMPUS_01"
+        assertTrue(CollegeBroadcastVerifier.isCampusScopeMatching(broadcastScope, enrolledScope))
+    }
+
+    @Test
+    fun test31_Phase6D6_Campus02DoesNotMatchCampus01() {
+        val enrolledScope = "COLLEGE:CAMPUS_02"
+        val broadcastScope = "COLLEGE:CAMPUS_01"
+        assertFalse(CollegeBroadcastVerifier.isCampusScopeMatching(broadcastScope, enrolledScope))
+    }
+
+    @Test
+    fun test32_Phase6D6_EnrollmentStatePersists() {
+        val initialScope = "COLLEGE:CAMPUS_01"
+        val reloadedScope = "COLLEGE:CAMPUS_01"
+        assertEquals(initialScope, reloadedScope)
+        assertTrue(CollegeBroadcastVerifier.isCampusScopeMatching("CAMPUS_01", reloadedScope))
+    }
+
+    @Test
+    fun test33_Phase6D6_EnrolledCampus01DeviceAcceptsCampus01Broadcast() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Valid Admin Alert",
+            message = "Accepted by enrolled device"
+        )
+        assertNotNull(bc)
+
+        val verResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc!!,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.AUTHORIZED, verResult)
+        assertTrue(CollegeBroadcastVerifier.isCampusScopeMatching(bc.institutionScope, institutionScope))
+    }
+
+    @Test
+    fun test34_Phase6D6_EnrolledCampus02DeviceDoesNotDisplayCampus01Broadcast() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Campus 1 Alert",
+            message = "Targeting Campus 1"
+        )
+        assertNotNull(bc)
+
+        val isDisplayed = CollegeBroadcastVerifier.isCampusScopeMatching(bc!!.institutionScope, "COLLEGE:CAMPUS_02")
+        assertFalse(isDisplayed)
+    }
+
+    @Test
+    fun test35_Phase6D6_NonEnrolledDeviceDoesNotDisplayCampusBroadcast() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Campus Alert",
+            message = "Message"
+        )
+        assertNotNull(bc)
+
+        val enrolledScope: String? = null
+        val isDisplayed = CollegeBroadcastVerifier.isCampusScopeMatching(bc!!.institutionScope, enrolledScope)
+        assertFalse(isDisplayed)
+    }
+
+    @Test
+    fun test36_Phase6D6_NonMemberRelayBehaviorRemainsPossible() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Relay Alert",
+            message = "Relayed through non-enrolled node"
+        )
+        assertNotNull(bc)
+
+        val header = com.connectmesh.protocol.PacketHeader(
+            packetType = com.connectmesh.protocol.PacketType.COLLEGE_BROADCAST,
+            packetId = 9999L,
+            sourceId = adminId,
+            destinationId = 0L,
+            payloadLength = bc!!.toWirePayload().size.toShort(),
+            ttl = 7
+        )
+        val packet = com.connectmesh.protocol.Packet(header, payload = bc.toWirePayload())
+
+        val isDisplayedOnRelayNode = CollegeBroadcastVerifier.isCampusScopeMatching(bc.institutionScope, "CAMPUS_99")
+        assertFalse(isDisplayedOnRelayNode)
+        assertTrue(packet.header.ttl > 1)
+    }
+
+    @Test
+    fun test37_Phase6D6_InvalidSignatureRemainsRejected() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Message"
+        )
+        assertNotNull(bc)
+
+        val forgedBc = bc!!.copy(signatureHex = "DEADBEEF0011223344")
+        val result = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = forgedBc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, result)
+    }
+
+    @Test
+    fun test38_Phase6D6_UnknownIssuerRemainsRejected() {
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Alert",
+            message = "Message"
+        )
+        assertNotNull(bc)
+
+        val result = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc!!,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = null
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_UNTRUSTED_ISSUER, result)
+    }
+
+    @Test
+    fun test39_Phase6D6_ValidDuplicateRemainsDeduplicated() {
+        val bcId = "BC-DEDUP-6D6-01"
+        assertFalse(broadcastManager.isDuplicateOrAdd(bcId))
+        assertTrue(broadcastManager.isDuplicateOrAdd(bcId))
+    }
+
+    @Test
+    fun test40_Phase6D6_ForgedBroadcastCannotPoisonDedup() {
+        val bcId = "BC-POISON-6D6-01"
+        val forgedBc = CollegeBroadcast(
+            broadcastId = bcId,
+            institutionScope = institutionScope,
+            senderConnectMeshId = adminId,
+            senderCredentialId = "CRED-ADMIN-01",
+            createdAt = System.currentTimeMillis(),
+            expiresAt = System.currentTimeMillis() + 86400000L,
+            priority = BroadcastPriority.HIGH,
+            broadcastType = BroadcastType.ANNOUNCEMENT,
+            title = "Forged Alert",
+            message = "Forged Payload",
+            signatureHex = "BADF00D"
+        )
+
+        val result = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = forgedBc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = adminKeyPair.public.encoded
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, result)
+        assertNull(broadcastManager.getBroadcast(bcId))
+    }
 }

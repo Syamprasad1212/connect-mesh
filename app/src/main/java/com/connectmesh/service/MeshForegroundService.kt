@@ -78,6 +78,9 @@ class MeshForegroundService : Service() {
     lateinit var staticRelayController: StaticRelayController
         private set
 
+    var enrolledCampusScope: String? = "COLLEGE:CAMPUS_01"
+        private set
+
     // Local SQLite Persistence Helper
     private lateinit var dbHelper: AppDatabaseHelper
 
@@ -288,6 +291,15 @@ class MeshForegroundService : Service() {
             }
         } catch (e: Exception) {
             NetworkEventLogger.log("CONNECT_MESH_AUTH: ERROR restoring trusted issuers from prefs: ${e.message}")
+        }
+
+        // Restore persisted campus config from SharedPreferences
+        try {
+            val campusPrefs = getSharedPreferences("connect_mesh_campus_config", Context.MODE_PRIVATE)
+            val savedScope = campusPrefs.getString("enrolled_campus_scope", "COLLEGE:CAMPUS_01")
+            enrolledCampusScope = if (savedScope.isNullOrBlank()) null else savedScope
+        } catch (e: Exception) {
+            NetworkEventLogger.log("CONNECT_MESH_AUTH: ERROR restoring campus scope: ${e.message}")
         }
 
         classroomManager = ClassroomManager(authorizationManager)
@@ -686,7 +698,7 @@ class MeshForegroundService : Service() {
                                     broadcast = bc,
                                     actualSenderId = packet.header.sourceId,
                                     trustedAdminPublicKeyBytes = trustedAdminKey,
-                                    requiredScope = "COLLEGE:CAMPUS_01",
+                                    requiredScope = null,
                                     revocationManager = authorizationManager.revocationManager
                                 )
                             } else {
@@ -695,10 +707,14 @@ class MeshForegroundService : Service() {
 
                             if (verResult == CollegeBroadcastVerifier.VerificationResult.AUTHORIZED) {
                                 if (!campusBroadcastManager.isDuplicateOrAdd(bc.broadcastId)) {
-                                    campusBroadcastManager.addVerifiedBroadcast(bc)
-                                    dbHelper.saveBroadcast(bc)
-                                    _campusBroadcastsFlow.value = campusBroadcastManager.getAllVerifiedBroadcasts()
-                                    NetworkEventLogger.log("CONNECT_MESH_BROADCAST: COLLEGE_BROADCAST_RECEIVED_VERIFIED id=${bc.broadcastId} title='${bc.title}'")
+                                    if (CollegeBroadcastVerifier.isCampusScopeMatching(bc.institutionScope, enrolledCampusScope)) {
+                                        campusBroadcastManager.addVerifiedBroadcast(bc)
+                                        dbHelper.saveBroadcast(bc)
+                                        _campusBroadcastsFlow.value = campusBroadcastManager.getAllVerifiedBroadcasts()
+                                        NetworkEventLogger.log("CONNECT_MESH_BROADCAST: COLLEGE_BROADCAST_RECEIVED_VERIFIED id=${bc.broadcastId} title='${bc.title}' scope=${bc.institutionScope}")
+                                    } else {
+                                        NetworkEventLogger.log("CONNECT_MESH_BROADCAST: IGNORED_SCOPE_MISMATCH id=${bc.broadcastId} broadcastScope=${bc.institutionScope} enrolledScope=$enrolledCampusScope")
+                                    }
                                 } else {
                                     NetworkEventLogger.log("CONNECT_MESH_BROADCAST: SUPPRESSED_DUPLICATE_BROADCAST id=${bc.broadcastId}")
                                 }
@@ -840,7 +856,7 @@ class MeshForegroundService : Service() {
         return msg
     }
 
-    fun createCampusBroadcast(title: String, message: String, priority: BroadcastPriority = BroadcastPriority.NORMAL, scope: String = "COLLEGE:CAMPUS_01"): CollegeBroadcast? {
+    fun createCampusBroadcast(title: String, message: String, priority: BroadcastPriority = BroadcastPriority.NORMAL, scope: String = (enrolledCampusScope ?: "COLLEGE:CAMPUS_01")): CollegeBroadcast? {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         val entry = keyStore.getEntry("connect_mesh_identity_key", null) as? KeyStore.PrivateKeyEntry ?: return null
         val adminPrivateKey = entry.privateKey
@@ -885,12 +901,30 @@ class MeshForegroundService : Service() {
         return bc
     }
 
-    fun registerTrustedCampusIssuer(issuerId: Long, publicKeyString: String): Boolean {
+    fun registerTrustedCampusIssuer(issuerId: Long, publicKeyString: String, campusScope: String = "COLLEGE:CAMPUS_01"): Boolean {
         val keyBytes = authorizationManager.decodePublicKey(publicKeyString) ?: return false
         authorizationManager.registerTrustedIssuer(issuerId, keyBytes)
         saveTrustedIssuerToPrefs(issuerId, keyBytes)
-        NetworkEventLogger.log("CONNECT_MESH_AUTH: TRUSTED_CAMPUS_ISSUER_ENROLLED id=0x${issuerId.toString(16).uppercase()}")
+        setEnrolledCampusScope(campusScope)
+        NetworkEventLogger.log("CONNECT_MESH_AUTH: TRUSTED_CAMPUS_ISSUER_ENROLLED id=0x${issuerId.toString(16).uppercase()} scope=$enrolledCampusScope")
         return true
+    }
+
+    fun setEnrolledCampusScope(scope: String?) {
+        if (scope.isNullOrBlank()) {
+            this.enrolledCampusScope = null
+        } else {
+            var formattedScope = scope.trim().uppercase()
+            if (!formattedScope.contains(":")) formattedScope = "COLLEGE:$formattedScope"
+            this.enrolledCampusScope = formattedScope
+        }
+        try {
+            val prefs = getSharedPreferences("connect_mesh_campus_config", Context.MODE_PRIVATE)
+            prefs.edit().putString("enrolled_campus_scope", this.enrolledCampusScope).apply()
+            NetworkEventLogger.log("CONNECT_MESH_AUTH: CAMPUS_SCOPE_SET scope=$enrolledCampusScope")
+        } catch (e: Exception) {
+            NetworkEventLogger.log("CONNECT_MESH_AUTH: ERROR saving campus scope: ${e.message}")
+        }
     }
 
     private fun saveTrustedIssuerToPrefs(issuerId: Long, keyBytes: ByteArray) {
