@@ -13,15 +13,20 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.connectmesh.broadcast.BroadcastPriority
+import com.connectmesh.broadcast.CampusEnrollmentDetails
 import com.connectmesh.broadcast.CollegeBroadcast
 import com.connectmesh.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
+
+private enum class SetupTab { JOIN, CREATE }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -29,6 +34,8 @@ fun CampusBroadcastScreen(
     broadcasts: List<CollegeBroadcast>,
     enrolledCampusScope: String? = "COLLEGE:CAMPUS_01",
     canCreateBroadcast: Boolean,
+    localEnrollmentDetails: CampusEnrollmentDetails? = null,
+    onCreateAdminCampus: ((scope: String) -> CampusEnrollmentDetails?)? = null,
     onCreateBroadcast: (title: String, message: String, priority: BroadcastPriority) -> Unit,
     onRegisterTrustIssuer: ((issuerId: String, publicKey: String, campusScope: String) -> Boolean)? = null
 ) {
@@ -38,12 +45,18 @@ fun CampusBroadcastScreen(
     var messageInput by remember { mutableStateOf("") }
     var selectedPriority by remember { mutableStateOf(BroadcastPriority.NORMAL) }
 
+    var selectedSetupTab by remember { mutableStateOf(if (canCreateBroadcast) SetupTab.CREATE else SetupTab.JOIN) }
+    var createdDetails by remember(localEnrollmentDetails) { mutableStateOf(localEnrollmentDetails) }
+
     var campusScopeInput by remember(enrolledCampusScope) { mutableStateOf(enrolledCampusScope?.removePrefix("COLLEGE:") ?: "CAMPUS_01") }
     var issuerIdInput by remember { mutableStateOf("") }
     var publicKeyInput by remember { mutableStateOf("") }
+    var pasteInput by remember { mutableStateOf("") }
+
     var trustErrorMessage by remember { mutableStateOf<String?>(null) }
     var trustSuccessMessage by remember { mutableStateOf<String?>(null) }
 
+    val clipboardManager = LocalClipboardManager.current
     val dateFormat = remember { SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault()) }
 
     Scaffold(
@@ -53,7 +66,7 @@ fun CampusBroadcastScreen(
                 title = { Text("Campus Announcements", fontWeight = FontWeight.Bold, color = AppTextPrimary) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = AppBackground),
                 actions = {
-                    if (onRegisterTrustIssuer != null) {
+                    if (onRegisterTrustIssuer != null || onCreateAdminCampus != null) {
                         IconButton(onClick = { showTrustDialog = true }) {
                             Icon(Icons.Default.School, contentDescription = "Campus Setup", tint = AppPrimaryAccent)
                         }
@@ -146,7 +159,7 @@ fun CampusBroadcastScreen(
                                         color = if (enrolledCampusScope != null) AppSuccessGreen else AppEmergencyRed
                                     )
                                 }
-                                if (onRegisterTrustIssuer != null) {
+                                if (onRegisterTrustIssuer != null || onCreateAdminCampus != null) {
                                     TextButton(
                                         onClick = { showTrustDialog = true },
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
@@ -307,45 +320,183 @@ fun CampusBroadcastScreen(
                 )
             }
 
-            if (showTrustDialog && onRegisterTrustIssuer != null) {
+            if (showTrustDialog) {
                 AlertDialog(
                     onDismissRequest = {
                         showTrustDialog = false
                         trustErrorMessage = null
                         trustSuccessMessage = null
                     },
-                    title = { Text("Campus Setup", fontWeight = FontWeight.Bold) },
+                    title = { Text("Campus Setup & Enrollment", fontWeight = FontWeight.Bold) },
                     text = {
                         Column {
-                            Text(
-                                "Enroll this device into a campus to receive official verified announcements offline.",
-                                fontSize = 12.sp,
-                                color = AppTextSecondary
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            OutlinedTextField(
-                                value = campusScopeInput,
-                                onValueChange = { campusScopeInput = it; trustErrorMessage = null },
-                                label = { Text("Campus Scope (e.g. CAMPUS_01)") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = issuerIdInput,
-                                onValueChange = { issuerIdInput = it; trustErrorMessage = null },
-                                label = { Text("Campus Authority ID (Hex or Dec)") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = publicKeyInput,
-                                onValueChange = { publicKeyInput = it; trustErrorMessage = null },
-                                label = { Text("Campus Authority Key (Base64 / Hex)") },
+                            Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                minLines = 2
-                            )
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                FilterChip(
+                                    selected = selectedSetupTab == SetupTab.JOIN,
+                                    onClick = { selectedSetupTab = SetupTab.JOIN },
+                                    label = { Text("Join Campus") }
+                                )
+                                if (canCreateBroadcast || onCreateAdminCampus != null) {
+                                    FilterChip(
+                                        selected = selectedSetupTab == SetupTab.CREATE,
+                                        onClick = { selectedSetupTab = SetupTab.CREATE },
+                                        label = { Text("Create Campus") }
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            if (selectedSetupTab == SetupTab.CREATE) {
+                                Text(
+                                    "Configure this device as Campus Admin and obtain enrollment credentials for student devices.",
+                                    fontSize = 12.sp,
+                                    color = AppTextSecondary
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                OutlinedTextField(
+                                    value = campusScopeInput,
+                                    onValueChange = { campusScopeInput = it; trustErrorMessage = null },
+                                    label = { Text("Campus Scope (e.g. CAMPUS_01)") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Button(
+                                    onClick = {
+                                        if (campusScopeInput.isNotBlank() && onCreateAdminCampus != null) {
+                                            val details = onCreateAdminCampus(campusScopeInput)
+                                            if (details != null) {
+                                                createdDetails = details
+                                                trustSuccessMessage = "Campus ${details.campusScope} created & active!"
+                                                trustErrorMessage = null
+                                            } else {
+                                                trustErrorMessage = "Failed to create campus authority"
+                                            }
+                                        } else {
+                                            trustErrorMessage = "Please enter a valid Campus Scope"
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = AppPrimaryAccent)
+                                ) {
+                                    Text("Create & Register Campus Authority")
+                                }
+
+                                val currentDetails = createdDetails ?: localEnrollmentDetails
+                                if (currentDetails != null) {
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Surface(
+                                        color = AppSecondaryBackground,
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp)) {
+                                            Text("CAMPUS ENROLLMENT DETAILS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppPrimaryAccent)
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text("Scope: ${currentDetails.campusScope}", fontSize = 12.sp, color = AppTextPrimary)
+                                            Text("Authority ID: ${currentDetails.authorityIdHex}", fontSize = 12.sp, color = AppTextPrimary)
+                                            Text("Public Key: ${currentDetails.authorityPublicKeyBase64.take(24)}...", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = AppTextSecondary)
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Button(
+                                                onClick = {
+                                                    clipboardManager.setText(AnnotatedString(currentDetails.toCopyableString()))
+                                                    trustSuccessMessage = "Copied enrollment config to clipboard!"
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                colors = ButtonDefaults.buttonColors(containerColor = AppSuccessGreen)
+                                            ) {
+                                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("Copy Enrollment Details", fontSize = 12.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                Text(
+                                    "Enroll this device into a campus to receive official verified announcements offline.",
+                                    fontSize = 12.sp,
+                                    color = AppTextSecondary
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                OutlinedTextField(
+                                    value = pasteInput,
+                                    onValueChange = { input ->
+                                        pasteInput = input
+                                        val parsed = CampusEnrollmentDetails.parse(input)
+                                        if (parsed != null) {
+                                            campusScopeInput = parsed.campusScope.removePrefix("COLLEGE:")
+                                            issuerIdInput = parsed.authorityIdHex
+                                            publicKeyInput = parsed.authorityPublicKeyBase64
+                                            trustSuccessMessage = "Auto-filled from copied configuration!"
+                                            trustErrorMessage = null
+                                        }
+                                    },
+                                    label = { Text("Paste Full Config (Optional)") },
+                                    placeholder = { Text("SCOPE|ISSUER_ID|PUBLIC_KEY") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End
+                                ) {
+                                    TextButton(
+                                        onClick = {
+                                            val clip = clipboardManager.getText()?.text
+                                            if (!clip.isNullOrBlank()) {
+                                                val parsed = CampusEnrollmentDetails.parse(clip)
+                                                if (parsed != null) {
+                                                    pasteInput = clip
+                                                    campusScopeInput = parsed.campusScope.removePrefix("COLLEGE:")
+                                                    issuerIdInput = parsed.authorityIdHex
+                                                    publicKeyInput = parsed.authorityPublicKeyBase64
+                                                    trustSuccessMessage = "Auto-filled from clipboard!"
+                                                    trustErrorMessage = null
+                                                } else {
+                                                    trustErrorMessage = "Clipboard content is not a valid campus config"
+                                                }
+                                            } else {
+                                                trustErrorMessage = "Clipboard is empty"
+                                            }
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Auto-Fill from Clipboard", fontSize = 11.sp)
+                                    }
+                                }
+
+                                OutlinedTextField(
+                                    value = campusScopeInput,
+                                    onValueChange = { campusScopeInput = it; trustErrorMessage = null },
+                                    label = { Text("Campus Scope (e.g. CAMPUS_01)") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = issuerIdInput,
+                                    onValueChange = { issuerIdInput = it; trustErrorMessage = null },
+                                    label = { Text("Campus Authority ID (Hex or Dec)") },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = publicKeyInput,
+                                    onValueChange = { publicKeyInput = it; trustErrorMessage = null },
+                                    label = { Text("Campus Authority Key (Base64 / Hex)") },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    minLines = 2
+                                )
+                            }
 
                             if (trustErrorMessage != null) {
                                 Spacer(modifier = Modifier.height(8.dp))
@@ -358,26 +509,29 @@ fun CampusBroadcastScreen(
                         }
                     },
                     confirmButton = {
-                        Button(
-                            onClick = {
-                                if (issuerIdInput.isNotBlank() && publicKeyInput.isNotBlank() && campusScopeInput.isNotBlank()) {
-                                    val success = onRegisterTrustIssuer(issuerIdInput, publicKeyInput, campusScopeInput)
-                                    if (success) {
-                                        trustSuccessMessage = "Enrolled in ${campusScopeInput.trim().uppercase()} Successfully!"
-                                        trustErrorMessage = null
-                                        issuerIdInput = ""
-                                        publicKeyInput = ""
+                        if (selectedSetupTab == SetupTab.JOIN && onRegisterTrustIssuer != null) {
+                            Button(
+                                onClick = {
+                                    if (issuerIdInput.isNotBlank() && publicKeyInput.isNotBlank() && campusScopeInput.isNotBlank()) {
+                                        val success = onRegisterTrustIssuer(issuerIdInput, publicKeyInput, campusScopeInput)
+                                        if (success) {
+                                            trustSuccessMessage = "Enrolled in ${campusScopeInput.trim().uppercase()} Successfully!"
+                                            trustErrorMessage = null
+                                            issuerIdInput = ""
+                                            publicKeyInput = ""
+                                            pasteInput = ""
+                                        } else {
+                                            trustErrorMessage = "Invalid Key format or ID"
+                                            trustSuccessMessage = null
+                                        }
                                     } else {
-                                        trustErrorMessage = "Invalid Key format or ID"
-                                        trustSuccessMessage = null
+                                        trustErrorMessage = "Please fill in all fields"
                                     }
-                                } else {
-                                    trustErrorMessage = "Please fill in all fields"
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = AppPrimaryAccent)
-                        ) {
-                            Text("Enroll Campus")
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = AppPrimaryAccent)
+                            ) {
+                                Text("Enroll Campus")
+                            }
                         }
                     },
                     dismissButton = {
@@ -394,3 +548,4 @@ fun CampusBroadcastScreen(
         }
     }
 }
+

@@ -910,6 +910,57 @@ class MeshForegroundService : Service() {
         return true
     }
 
+    fun setupAdminCampus(campusScope: String): CampusEnrollmentDetails? {
+        var formattedScope = campusScope.trim().uppercase()
+        if (formattedScope.isBlank()) formattedScope = "CAMPUS_01"
+        if (!formattedScope.contains(":")) formattedScope = "COLLEGE:$formattedScope"
+
+        val localPubKey = CryptoIdentityManager.getInstance().publicKey
+        val keyStore = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val entry = keyStore.getEntry("connect_mesh_identity_key", null) as? java.security.KeyStore.PrivateKeyEntry
+        val signingPrivateKey = entry?.privateKey
+
+        if (signingPrivateKey != null) {
+            val selfAdminCred = RoleCredentialIssuer.issueCredential(
+                issuerId = deviceIdentity.deviceId,
+                issuerPrivateKey = signingPrivateKey,
+                subjectConnectMeshId = deviceIdentity.deviceId,
+                subjectPublicKeyBytes = localPubKey,
+                role = UserRole.ADMIN,
+                scope = formattedScope
+            )
+            if (selfAdminCred != null) {
+                authorizationManager.registerTrustedIssuer(deviceIdentity.deviceId, localPubKey)
+                authorizationManager.setLocalCredential(selfAdminCred)
+                saveTrustedIssuerToPrefs(deviceIdentity.deviceId, localPubKey)
+            }
+        }
+
+        setEnrolledCampusScope(formattedScope)
+
+        val pubKeyB64 = java.util.Base64.getEncoder().encodeToString(localPubKey)
+        val authorityIdHex = "0x${deviceIdentity.deviceId.toString(16).uppercase()}"
+
+        return CampusEnrollmentDetails(
+            campusScope = formattedScope,
+            authorityIdHex = authorityIdHex,
+            authorityPublicKeyBase64 = pubKeyB64
+        )
+    }
+
+    fun getLocalCampusEnrollmentDetails(): CampusEnrollmentDetails? {
+        val scope = enrolledCampusScope ?: return null
+        val localPubKey = CryptoIdentityManager.getInstance().publicKey
+        val pubKeyB64 = java.util.Base64.getEncoder().encodeToString(localPubKey)
+        val authorityIdHex = "0x${deviceIdentity.deviceId.toString(16).uppercase()}"
+
+        return CampusEnrollmentDetails(
+            campusScope = scope,
+            authorityIdHex = authorityIdHex,
+            authorityPublicKeyBase64 = pubKeyB64
+        )
+    }
+
     fun setEnrolledCampusScope(scope: String?) {
         if (scope.isNullOrBlank()) {
             this.enrolledCampusScope = null

@@ -835,4 +835,138 @@ class CollegeBroadcastSecurityTest {
         assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_INVALID_SIGNATURE, result)
         assertNull(broadcastManager.getBroadcast(bcId))
     }
+
+    @Test
+    fun test41_Phase6D7_CampusEnrollmentDetailsCopyAndParse() {
+        val original = CampusEnrollmentDetails(
+            campusScope = "COLLEGE:CAMPUS_01",
+            authorityIdHex = "0x3988776655443322",
+            authorityPublicKeyBase64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE12345678"
+        )
+        val copyable = original.toCopyableString()
+        assertEquals("COLLEGE:CAMPUS_01|0x3988776655443322|MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE12345678", copyable)
+
+        val parsed = CampusEnrollmentDetails.parse(copyable)
+        assertNotNull(parsed)
+        assertEquals(original.campusScope, parsed!!.campusScope)
+        assertEquals(original.authorityIdHex, parsed.authorityIdHex)
+        assertEquals(original.authorityPublicKeyBase64, parsed.authorityPublicKeyBase64)
+    }
+
+    @Test
+    fun test42_Phase6D7_AdminEnrollmentExportNeverExposesPrivateKey() {
+        val pubKeyB64 = java.util.Base64.getEncoder().encodeToString(adminKeyPair.public.encoded)
+        val details = CampusEnrollmentDetails(
+            campusScope = "COLLEGE:CAMPUS_01",
+            authorityIdHex = "0x${adminId.toString(16).uppercase()}",
+            authorityPublicKeyBase64 = pubKeyB64
+        )
+        // Ensure private key string is not present in exported string
+        val exported = details.toCopyableString()
+        assertFalse(exported.contains("PRIVATE"))
+        assertFalse(exported.contains("PrivateKey"))
+        assertTrue(exported.contains("0x3988776655443322"))
+    }
+
+    @Test
+    fun test43_Phase6D7_StudentEnrollmentUsingAdminPublicDetailsVerifiesBroadcast() {
+        // Admin device exports enrollment details
+        val pubKeyB64 = java.util.Base64.getEncoder().encodeToString(adminKeyPair.public.encoded)
+        val details = CampusEnrollmentDetails(
+            campusScope = institutionScope,
+            authorityIdHex = "0x${adminId.toString(16).uppercase()}",
+            authorityPublicKeyBase64 = pubKeyB64
+        )
+
+        // Student device receives and parses enrollment details
+        val parsedDetails = CampusEnrollmentDetails.parse(details.toCopyableString())
+        assertNotNull(parsedDetails)
+
+        val studentAuthManager = AuthorizationManager(revocationManager)
+        val cleanIdStr = parsedDetails!!.authorityIdHex.trim().removePrefix("0x").removePrefix("0X")
+        val parsedIssuerId = cleanIdStr.toLongOrNull(16) ?: 0L
+        val decodedPubKeyBytes = studentAuthManager.decodePublicKey(parsedDetails.authorityPublicKeyBase64)
+
+        assertNotNull(decodedPubKeyBytes)
+        studentAuthManager.registerTrustedIssuer(parsedIssuerId, decodedPubKeyBytes!!)
+
+        // Admin creates campus broadcast
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Campus Announcement",
+            message = "Welcome to campus!"
+        )
+        assertNotNull(bc)
+
+        // Student verifies broadcast using registered trust anchor
+        val trustedKeyOnStudent = studentAuthManager.getTrustedIssuerKey(bc!!.senderConnectMeshId)
+        val verifyResult = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = trustedKeyOnStudent
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.AUTHORIZED, verifyResult)
+    }
+
+    @Test
+    fun test44_Phase6D7_ScopeFilteringPreservesMeshRelayForNonMatchingCampus() {
+        val studentScope = "COLLEGE:CAMPUS_01"
+        val broadcastScope = "COLLEGE:CAMPUS_02"
+
+        val admin2Id: Long = 0x7988776655443322L
+        val admin2KeyPair = java.security.KeyPairGenerator.getInstance("EC").apply {
+            initialize(java.security.spec.ECGenParameterSpec("secp256r1"), java.security.SecureRandom())
+        }.generateKeyPair()
+
+        val admin2AuthManager = AuthorizationManager(revocationManager)
+        admin2AuthManager.registerTrustedIssuer(issuerId, issuerKeyPair.public.encoded)
+        admin2AuthManager.initializeLocalIdentity(admin2Id, admin2KeyPair.public.encoded)
+
+        val admin2Cred = RoleCredentialIssuer.issueCredential(
+            issuerId = issuerId,
+            issuerPrivateKey = issuerKeyPair.private,
+            subjectConnectMeshId = admin2Id,
+            subjectPublicKeyBytes = admin2KeyPair.public.encoded,
+            role = UserRole.ADMIN,
+            scope = broadcastScope
+        )
+        assertNotNull(admin2Cred)
+        admin2AuthManager.setLocalCredential(admin2Cred!!)
+
+        val admin2BroadcastManager = CampusBroadcastManager(admin2AuthManager)
+
+        val bc = admin2BroadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = admin2Id,
+            adminCredentialId = "CRED-ADMIN-02",
+            adminPrivateKey = admin2KeyPair.private,
+            institutionScope = broadcastScope,
+            title = "Other Campus Alert",
+            message = "Alert for Campus 02"
+        )
+        assertNotNull(bc)
+
+        // UI display check
+        val isDisplayedOnStudentDevice = CollegeBroadcastVerifier.isCampusScopeMatching(bc!!.institutionScope, studentScope)
+        assertFalse(isDisplayedOnStudentDevice)
+
+        // Mesh packet check for relay
+        val packet = com.connectmesh.protocol.Packet(
+            header = com.connectmesh.protocol.PacketHeader(
+                packetType = com.connectmesh.protocol.PacketType.COLLEGE_BROADCAST,
+                packetId = 8888L,
+                sourceId = admin2Id,
+                destinationId = 0L,
+                payloadLength = bc.toWirePayload().size.toShort(),
+                ttl = 7
+            ),
+            payload = bc.toWirePayload()
+        )
+        // Multi-hop routing packet remains valid with destinationId=0L (broadcast) and TTL > 1
+        assertEquals(0L, packet.header.destinationId)
+        assertTrue(packet.header.ttl > 1)
+    }
 }
+

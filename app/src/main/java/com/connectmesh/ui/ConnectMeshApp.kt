@@ -323,6 +323,10 @@ fun ConnectMeshApp(
                                     broadcasts = broadcasts,
                                     enrolledCampusScope = service.enrolledCampusScope,
                                     canCreateBroadcast = service.authorizationManager.hasRole(com.connectmesh.auth.UserRole.ADMIN),
+                                    localEnrollmentDetails = service.getLocalCampusEnrollmentDetails(),
+                                    onCreateAdminCampus = { scope ->
+                                        service.setupAdminCampus(scope)
+                                    },
                                     onCreateBroadcast = { title, msg, priority ->
                                         service.createCampusBroadcast(title, msg, priority)
                                     },
