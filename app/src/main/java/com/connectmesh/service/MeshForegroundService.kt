@@ -1339,7 +1339,7 @@ class MeshForegroundService : Service() {
         )
         _sosAlertsFlow.value = _sosAlertsFlow.value + mySos
 
-        broadcastPacketToAll(encodedBytes)
+        broadcastSosPacket(encodedBytes)
         relayManager.sosPacketsSent.incrementAndGet()
         NetworkEventLogger.log("CONNECT_MESH_SOS: SOS_SENT packetId=$packetId msg='$customMessage'")
     }
@@ -1857,6 +1857,25 @@ class MeshForegroundService : Service() {
         connectionManager.getAllConnections()
             .filter { it.state == BleConnectionState.READY }
             .forEach { conn -> connectionManager.sendPacket(conn.peerId, packetBytes) }
+    }
+
+    private fun broadcastSosPacket(packetBytes: ByteArray) {
+        val readyConnections = connectionManager.getAllConnections().filter { it.state == BleConnectionState.READY }
+        val readyPeerIds = readyConnections.map { it.peerId }.toSet()
+        readyConnections.forEach { conn ->
+            connectionManager.sendPacket(conn.peerId, packetBytes, priority = BleOperationQueue.Priority.HIGH)
+        }
+
+        val nonReadyConnections = connectionManager.getAllConnections().filter { it.state != BleConnectionState.READY }
+        val directPeers = peerManager.getAllPeers().filter { it.hopCount == 1 && !readyPeerIds.contains(it.peerId) }
+
+        val targetPeerIds = (nonReadyConnections.map { it.peerId } + directPeers.map { it.peerId }).toSet()
+
+        targetPeerIds.forEach { peerId ->
+            if (!readyPeerIds.contains(peerId)) {
+                dispatchOrQueuePacket(peerId, packetBytes, priority = BleOperationQueue.Priority.HIGH)
+            }
+        }
     }
 
     private fun dispatchOrQueuePacket(
