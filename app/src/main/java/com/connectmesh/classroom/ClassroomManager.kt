@@ -41,7 +41,12 @@ class ClassroomManager(
             return null
         }
 
-        val groupId = "GRP-" + name.uppercase().replace(" ", "_") + "-" + UUID.randomUUID().toString().take(6).uppercase()
+        val cleanName = name.uppercase().replace(Regex("[^A-Z0-9]"), "")
+        val prefix = if (cleanName.length >= 3) cleanName.take(4) else (cleanName + "CLASS").take(4)
+        val suffix = UUID.randomUUID().toString().replace("-", "").take(4).uppercase()
+        val joinCode = "$prefix$suffix"
+        val groupId = "GRP-$joinCode"
+
         val initialKey = ByteArray(32).apply { SecureRandom().nextBytes(this) }
         val keyHex = initialKey.joinToString("") { "%02x".format(it) }
 
@@ -52,7 +57,8 @@ class ClassroomManager(
             createdByConnectMeshId = teacherConnectMeshId,
             createdAt = System.currentTimeMillis(),
             groupKeyVersion = 1,
-            activeGroupKeyHex = keyHex
+            activeGroupKeyHex = keyHex,
+            joinCode = joinCode
         )
 
         classrooms[groupId] = group
@@ -79,7 +85,7 @@ class ClassroomManager(
         groupMembers[teacherConnectMeshId] = selfCred
         memberships[groupId] = groupMembers
 
-        NetworkEventLogger.log("CONNECT_MESH_CLASSROOM: CLASSROOM_CREATED id=$groupId name=$name scope=$institutionScope owner=0x${teacherConnectMeshId.toString(16).uppercase()}")
+        NetworkEventLogger.log("CONNECT_MESH_CLASSROOM: CLASSROOM_CREATED id=$groupId joinCode=$joinCode name=$name scope=$institutionScope owner=0x${teacherConnectMeshId.toString(16).uppercase()}")
         return group
     }
 
@@ -254,7 +260,7 @@ class ClassroomManager(
 
     fun getAllClassrooms(): List<ClassroomGroup> = classrooms.values.toList()
 
-    fun registerClassroom(group: ClassroomGroup) {
+    fun registerClassroom(group: ClassroomGroup, localDeviceId: Long = 0L) {
         classrooms[group.groupId] = group
         val keyBytes = try {
             group.activeGroupKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
@@ -263,15 +269,35 @@ class ClassroomManager(
         }
         val keysMap = groupKeys.computeIfAbsent(group.groupId) { ConcurrentHashMap() }
         keysMap[group.groupKeyVersion] = keyBytes
+
+        if (localDeviceId != 0L) {
+            val groupMembers = memberships.computeIfAbsent(group.groupId) { ConcurrentHashMap() }
+            if (!groupMembers.containsKey(localDeviceId)) {
+                val cred = ClassroomMembershipCredential(
+                    membershipId = "MEM-RECOVERY-" + UUID.randomUUID().toString().take(8).uppercase(),
+                    groupId = group.groupId,
+                    memberConnectMeshId = localDeviceId,
+                    memberPublicKeyFingerprint = "RECOVERY_FINGERPRINT",
+                    memberRole = if (group.createdByConnectMeshId == localDeviceId) UserRole.TEACHER else UserRole.USER,
+                    issuedByConnectMeshId = group.createdByConnectMeshId,
+                    issuedAt = group.createdAt,
+                    expiresAt = System.currentTimeMillis() + 365 * 24 * 60 * 60 * 1000L,
+                    signatureHex = "STORED_MEMBERSHIP"
+                )
+                groupMembers[localDeviceId] = cred
+            }
+        }
     }
 
     fun findClassroomByCode(code: String): ClassroomGroup? {
-        val cleanCode = code.trim().uppercase()
+        val cleanCode = code.trim().uppercase().removePrefix("GRP-")
         if (cleanCode.isBlank()) return null
         return classrooms.values.find { group ->
+            group.joinCode.uppercase() == cleanCode ||
+            group.groupId.uppercase().removePrefix("GRP-") == cleanCode ||
             group.groupId.uppercase() == cleanCode ||
             group.groupId.uppercase() == "GRP-$cleanCode" ||
-            group.groupId.uppercase().removePrefix("GRP-") == cleanCode
+            group.groupName.uppercase().replace(Regex("[^A-Z0-9]"), "") == cleanCode
         }
     }
 

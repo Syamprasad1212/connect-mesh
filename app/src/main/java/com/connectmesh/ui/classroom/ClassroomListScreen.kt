@@ -261,7 +261,7 @@ fun ClassroomListScreen(
                                     }
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
-                                        "Code: ${group.groupId} • Key V${group.groupKeyVersion}",
+                                        "Join Code: ${group.displayJoinCode} • Key V${group.groupKeyVersion}",
                                         fontSize = 12.sp,
                                         color = AppTextSecondary
                                     )
@@ -311,7 +311,7 @@ fun ClassroomListScreen(
                     if (joinTab == 0) {
                         if (joinPreviewGroup == null) {
                             Text(
-                                "Enter the Classroom Code provided by your faculty:",
+                                "Enter the short Join Code (e.g. CSE7K4P) provided by your faculty:",
                                 fontSize = 13.sp,
                                 color = AppTextSecondary
                             )
@@ -322,7 +322,7 @@ fun ClassroomListScreen(
                                     classroomCodeInput = it.uppercase()
                                     joinError = null
                                 },
-                                label = { Text("Classroom Code (e.g. GRP-CSE_A-8F31B9)") },
+                                label = { Text("Join Code (e.g. CSE7K4P)") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = OutlinedTextFieldDefaults.colors(
@@ -333,9 +333,28 @@ fun ClassroomListScreen(
                                 )
                             )
 
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        val clip = clipboardManager.getText()?.text
+                                        if (!clip.isNullOrBlank()) {
+                                            classroomCodeInput = clip.trim().uppercase()
+                                            joinError = null
+                                        }
+                                    }
+                                ) {
+                                    Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Auto-Fill from Clipboard", fontSize = 11.sp, color = AppPrimaryAccent)
+                                }
+                            }
+
                             val err = joinError
                             if (err != null) {
-                                Spacer(modifier = Modifier.height(8.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
                                 Text(err, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
                             }
                         } else {
@@ -347,12 +366,12 @@ fun ClassroomListScreen(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(modifier = Modifier.padding(14.dp)) {
-                                    Text("CLASSROOM FOUND", color = AppPrimaryAccent, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    Text("CLASSROOM FOUND ✓", color = AppSuccessGreen, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(preview.groupName, fontWeight = FontWeight.Bold, fontSize = 18.sp, color = AppTextPrimary)
+                                    Text("Join Code: ${preview.displayJoinCode}", fontSize = 13.sp, color = AppPrimaryAccent, fontWeight = FontWeight.Bold)
                                     Text("Scope: ${preview.institutionScope}", fontSize = 12.sp, color = AppTextSecondary)
-                                    Text("Code: ${preview.groupId}", fontSize = 12.sp, color = AppPrimaryAccent, fontWeight = FontWeight.Bold)
-                                    Text("Creator: 0x${preview.createdByConnectMeshId.toString(16).uppercase()}", fontSize = 11.sp, color = AppTextMuted)
+                                    Text("Faculty: 0x${preview.createdByConnectMeshId.toString(16).uppercase()}", fontSize = 11.sp, color = AppTextMuted)
                                 }
                             }
                         }
@@ -530,12 +549,12 @@ fun ClassroomListScreen(
                             modifier = Modifier.padding(16.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Text("CLASSROOM CODE", fontSize = 11.sp, color = AppTextMuted, fontWeight = FontWeight.Bold)
+                            Text("JOIN CODE", fontSize = 11.sp, color = AppTextMuted, fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                createdGroup.groupId,
+                                createdGroup.displayJoinCode,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 20.sp,
+                                fontSize = 24.sp,
                                 color = AppPrimaryAccent
                             )
                         }
@@ -545,15 +564,15 @@ fun ClassroomListScreen(
 
                     OutlinedButton(
                         onClick = {
-                            clipboardManager.setText(AnnotatedString(createdGroup.groupId))
-                            successMessage = "Copied code ${createdGroup.groupId} to clipboard"
+                            clipboardManager.setText(AnnotatedString(createdGroup.displayJoinCode))
+                            successMessage = "Copied Join Code ${createdGroup.displayJoinCode} to clipboard"
                         },
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = AppPrimaryAccent),
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copy Classroom Code", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Text("Copy Join Code", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             },
@@ -592,11 +611,11 @@ fun ClassroomListScreen(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    Text("Classroom Code:", fontSize = 12.sp, color = AppTextSecondary)
+                    Text("Join Code:", fontSize = 12.sp, color = AppTextSecondary)
                     Text(
-                        inviteGroup.groupId,
+                        inviteGroup.displayJoinCode,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
+                        fontSize = 22.sp,
                         color = AppPrimaryAccent
                     )
 
@@ -604,15 +623,15 @@ fun ClassroomListScreen(
 
                     OutlinedButton(
                         onClick = {
-                            clipboardManager.setText(AnnotatedString(inviteGroup.groupId))
-                            successMessage = "Copied code ${inviteGroup.groupId} to clipboard"
+                            clipboardManager.setText(AnnotatedString(inviteGroup.displayJoinCode))
+                            successMessage = "Copied Join Code ${inviteGroup.displayJoinCode} to clipboard"
                         },
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = AppPrimaryAccent),
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copy Code", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("Copy Join Code", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))

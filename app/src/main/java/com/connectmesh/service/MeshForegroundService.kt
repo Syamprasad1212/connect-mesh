@@ -309,7 +309,7 @@ class MeshForegroundService : Service() {
         // Restore persisted classrooms from SQLite Database
         val savedClassrooms = dbHelper.getAllClassrooms()
         if (savedClassrooms.isNotEmpty()) {
-            savedClassrooms.forEach { classroomManager.registerClassroom(it) }
+            savedClassrooms.forEach { classroomManager.registerClassroom(it, deviceIdentity.deviceId) }
         } else {
             val demo = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", deviceIdentity.deviceId, localPubKey)
             if (demo != null) {
@@ -687,6 +687,35 @@ class MeshForegroundService : Service() {
                             }
                         }
                     }
+                    PacketType.CLASSROOM_KEY_SYNC -> {
+                        val payloadStr = try { String(packet.payload, Charsets.UTF_8) } catch (e: Exception) { "" }
+                        if (payloadStr.startsWith("CLASSROOM_INVITE|")) {
+                            val parts = payloadStr.split("|")
+                            if (parts.size >= 8) {
+                                val groupId = parts[1]
+                                val groupName = parts[2]
+                                val scope = parts[3]
+                                val creatorId = parts[4].toLongOrNull() ?: packet.header.sourceId
+                                val createdAt = parts[5].toLongOrNull() ?: System.currentTimeMillis()
+                                val keyVer = parts[6].toIntOrNull() ?: 1
+                                val keyHex = parts[7]
+                                val joinCode = if (parts.size >= 9) parts[8] else groupId.removePrefix("GRP-")
+
+                                val group = ClassroomGroup(
+                                    groupId = groupId,
+                                    groupName = groupName,
+                                    institutionScope = scope,
+                                    createdByConnectMeshId = creatorId,
+                                    createdAt = createdAt,
+                                    groupKeyVersion = keyVer,
+                                    activeGroupKeyHex = keyHex,
+                                    joinCode = joinCode
+                                )
+                                classroomManager.registerClassroom(group)
+                                NetworkEventLogger.log("CONNECT_MESH_CLASSROOM: INVITATION_RECEIVED groupId=$groupId joinCode=$joinCode")
+                            }
+                        }
+                    }
                     PacketType.COLLEGE_BROADCAST -> {
                         val bc = CollegeBroadcast.fromWirePayload(packet.payload)
                         if (bc != null) {
@@ -792,8 +821,26 @@ class MeshForegroundService : Service() {
         if (group != null) {
             dbHelper.saveClassroom(group)
             _classroomsFlow.value = classroomManager.getAllClassrooms()
+            broadcastClassroomInvite(group)
         }
         return group
+    }
+
+    fun broadcastClassroomInvite(group: ClassroomGroup) {
+        val payloadStr = "CLASSROOM_INVITE|${group.groupId}|${group.groupName}|${group.institutionScope}|${group.createdByConnectMeshId}|${group.createdAt}|${group.groupKeyVersion}|${group.activeGroupKeyHex}|${group.joinCode}"
+        val payloadBytes = payloadStr.toByteArray(Charsets.UTF_8)
+        val seq = System.nanoTime()
+        val header = PacketHeader(
+            packetType = PacketType.CLASSROOM_KEY_SYNC,
+            packetId = seq,
+            sourceId = deviceIdentity.deviceId,
+            destinationId = 0L,
+            payloadLength = payloadBytes.size.toShort(),
+            ttl = 7
+        )
+        val packet = Packet(header, payload = payloadBytes)
+        meshRouter.handleIncomingPacket(packet)
+        NetworkEventLogger.log("CONNECT_MESH_CLASSROOM: INVITATION_BROADCASTED groupId=${group.groupId} joinCode=${group.joinCode}")
     }
 
     fun joinClassroomByCode(code: String): ClassroomGroup? {

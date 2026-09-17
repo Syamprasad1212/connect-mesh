@@ -367,4 +367,101 @@ class ClassroomSecurityTest {
         assertFalse(group!!.groupId.contains(group.activeGroupKeyHex))
         assertFalse(group.groupId.contains("KEY"))
     }
+
+    @Test
+    fun test19_CreateClassroomGeneratesShortJoinCode() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+        assertTrue(group!!.joinCode.isNotBlank())
+        assertTrue(group.joinCode.length in 6..10)
+        assertEquals(group.joinCode, group.displayJoinCode)
+    }
+
+    @Test
+    fun test20_FindClassroomByShortJoinCode() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+
+        val found = classroomManager.findClassroomByCode(group!!.joinCode)
+        assertNotNull(found)
+        assertEquals(group.groupId, found!!.groupId)
+    }
+
+    @Test
+    fun test21_ClassroomInvitationRegistrationAndDiscovery() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+
+        // Remote device manager receives classroom invitation
+        val remoteManager = ClassroomManager(authorizationManager)
+        remoteManager.registerClassroom(group!!)
+
+        val foundOnRemote = remoteManager.findClassroomByCode(group.joinCode)
+        assertNotNull(foundOnRemote)
+        assertEquals(group.groupId, foundOnRemote!!.groupId)
+
+        val joined = remoteManager.joinClassroomByCode(group.joinCode, studentId, studentKeyPair.public.encoded)
+        assertNotNull(joined)
+        assertTrue(remoteManager.isMember(group.groupId, studentId))
+    }
+
+    @Test
+    fun test22_ClassroomRestorationPreservesLocalMembership() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+
+        // Simulate app restart on student device restoring classroom from DB
+        val studentAppManager = ClassroomManager(authorizationManager)
+        studentAppManager.registerClassroom(group!!, studentId)
+
+        assertTrue(studentAppManager.isMember(group.groupId, studentId))
+
+        // Student can decrypt messages after restart
+        val plainText = "Message After Restart".toByteArray()
+        val headerAad = "AAD".toByteArray()
+        val encResult = classroomManager.encryptGroupPayload(group.groupId, sequence, plainText, headerAad)
+        assertNotNull(encResult)
+
+        val (version, cipherPair) = encResult!!
+        val (cipherText, macTag) = cipherPair
+
+        val decrypted = studentAppManager.decryptGroupPayload(group.groupId, version, sequence, studentId, cipherText, macTag, headerAad)
+        assertNotNull(decrypted)
+        assertEquals("Message After Restart", String(decrypted!!, Charsets.UTF_8))
+    }
+
+    @Test
+    fun test23_ClassroomIsolation() {
+        val groupA = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        val groupB = classroomManager.createClassroom("CSE-B", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(groupA)
+        assertNotNull(groupB)
+
+        // Student joins only Group A
+        classroomManager.joinClassroomByCode(groupA!!.joinCode, studentId, studentKeyPair.public.encoded)
+        assertTrue(classroomManager.isMember(groupA.groupId, studentId))
+        assertFalse(classroomManager.isMember(groupB!!.groupId, studentId))
+
+        val plainText = "Secrets for CSE-B".toByteArray()
+        val headerAad = "AAD".toByteArray()
+        val encResult = classroomManager.encryptGroupPayload(groupB.groupId, sequence, plainText, headerAad)
+        assertNotNull(encResult)
+
+        val (version, cipherPair) = encResult!!
+        val (cipherText, macTag) = cipherPair
+
+        // Student tries to decrypt CSE-B message
+        val decrypted = classroomManager.decryptGroupPayload(groupB.groupId, version, sequence, studentId, cipherText, macTag, headerAad)
+        assertNull(decrypted)
+    }
+
+    @Test
+    fun test24_JoinCodeDoesNotExposeSymmetricKey() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+
+        assertFalse(group!!.joinCode.contains(group.activeGroupKeyHex))
+        assertTrue(group.activeGroupKeyHex.length == 64) // 256-bit Hex Key
+    }
 }
+
