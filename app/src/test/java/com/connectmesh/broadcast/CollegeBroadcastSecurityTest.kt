@@ -547,4 +547,104 @@ class CollegeBroadcastSecurityTest {
         val isDupSecond = broadcastManager.isDuplicateOrAdd(validBc.broadcastId)
         assertTrue(isDupSecond)
     }
+
+    @Test
+    fun test24_Phase6D5_DecodeValidBase64AndHexPublicKeys() {
+        val pubKeyBytes = adminKeyPair.public.encoded
+        val base64Key = java.util.Base64.getEncoder().encodeToString(pubKeyBytes)
+        val hexKey = pubKeyBytes.joinToString("") { "%02x".format(it) }
+
+        val decodedFromBase64 = AuthorizationManager.decodePublicKey(base64Key)
+        assertNotNull(decodedFromBase64)
+        assertArrayEquals(pubKeyBytes, decodedFromBase64)
+
+        val decodedFromHex = AuthorizationManager.decodePublicKey(hexKey)
+        assertNotNull(decodedFromHex)
+        assertArrayEquals(pubKeyBytes, decodedFromHex)
+    }
+
+    @Test
+    fun test25_Phase6D5_DecodeMalformedPublicKeyFails() {
+        assertNull(AuthorizationManager.decodePublicKey(""))
+        assertNull(AuthorizationManager.decodePublicKey("   "))
+        assertNull(AuthorizationManager.decodePublicKey("INVALID_NOT_BASE64_OR_HEX_KEY!!!"))
+        assertNull(AuthorizationManager.decodePublicKey("12345")) // Odd length hex
+        assertNull(AuthorizationManager.decodePublicKey("001122334455")) // Valid hex but invalid EC key spec
+    }
+
+    @Test
+    fun test26_Phase6D5_RemoteCampusBroadcastRejectedBeforeTrustEnrollment() {
+        val studentAuthManager = AuthorizationManager(revocationManager)
+        // Student has not enrolled admin's public key yet
+        val studentTrustedKey = studentAuthManager.getTrustedIssuerKey(adminId)
+        assertNull(studentTrustedKey)
+
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Remote Alert",
+            message = "Test message"
+        )
+        assertNotNull(bc)
+
+        val result = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc!!,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = studentTrustedKey
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.REJECTED_UNTRUSTED_ISSUER, result)
+    }
+
+    @Test
+    fun test27_Phase6D5_RemoteCampusBroadcastAcceptedAfterTrustEnrollment() {
+        val studentAuthManager = AuthorizationManager(revocationManager)
+        val adminPubKeyBase64 = java.util.Base64.getEncoder().encodeToString(adminKeyPair.public.encoded)
+
+        val decodedKey = studentAuthManager.decodePublicKey(adminPubKeyBase64)
+        assertNotNull(decodedKey)
+
+        studentAuthManager.registerTrustedIssuer(adminId, decodedKey!!)
+
+        val bc = broadcastManager.createAndSignBroadcast(
+            adminConnectMeshId = adminId,
+            adminCredentialId = "CRED-ADMIN-01",
+            adminPrivateKey = adminKeyPair.private,
+            institutionScope = institutionScope,
+            title = "Remote Alert",
+            message = "Verified after setup"
+        )
+        assertNotNull(bc)
+
+        val trustedAdminKey = studentAuthManager.getTrustedIssuerKey(adminId)
+        assertNotNull(trustedAdminKey)
+
+        val result = CollegeBroadcastVerifier.verifyBroadcast(
+            broadcast = bc!!,
+            actualSenderId = adminId,
+            trustedAdminPublicKeyBytes = trustedAdminKey
+        )
+        assertEquals(CollegeBroadcastVerifier.VerificationResult.AUTHORIZED, result)
+    }
+
+    @Test
+    fun test28_Phase6D5_PersistedTrustAnchorRestorationAcrossRestart() {
+        val authManager1 = AuthorizationManager(revocationManager)
+        val adminHexKey = adminKeyPair.public.encoded.joinToString("") { "%02x".format(it) }
+
+        val decodedKey1 = authManager1.decodePublicKey(adminHexKey)
+        assertNotNull(decodedKey1)
+        authManager1.registerTrustedIssuer(adminId, decodedKey1!!)
+
+        // Simulate app restart: re-parse hex key string into new AuthorizationManager instance
+        val authManager2 = AuthorizationManager(revocationManager)
+        val restoredKeyBytes = authManager2.decodePublicKey(adminHexKey)
+        assertNotNull(restoredKeyBytes)
+        authManager2.registerTrustedIssuer(adminId, restoredKeyBytes!!)
+
+        val retrievedKey = authManager2.getTrustedIssuerKey(adminId)
+        assertNotNull(retrievedKey)
+        assertArrayEquals(adminKeyPair.public.encoded, retrievedKey)
+    }
 }

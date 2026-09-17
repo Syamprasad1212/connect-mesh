@@ -28,12 +28,19 @@ import java.util.*
 fun CampusBroadcastScreen(
     broadcasts: List<CollegeBroadcast>,
     canCreateBroadcast: Boolean,
-    onCreateBroadcast: (title: String, message: String, priority: BroadcastPriority) -> Unit
+    onCreateBroadcast: (title: String, message: String, priority: BroadcastPriority) -> Unit,
+    onRegisterTrustIssuer: ((issuerId: String, publicKey: String) -> Boolean)? = null
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
+    var showTrustDialog by remember { mutableStateOf(false) }
     var titleInput by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
     var selectedPriority by remember { mutableStateOf(BroadcastPriority.NORMAL) }
+
+    var issuerIdInput by remember { mutableStateOf("") }
+    var publicKeyInput by remember { mutableStateOf("") }
+    var trustErrorMessage by remember { mutableStateOf<String?>(null) }
+    var trustSuccessMessage by remember { mutableStateOf<String?>(null) }
 
     val dateFormat = remember { SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault()) }
 
@@ -44,6 +51,11 @@ fun CampusBroadcastScreen(
                 title = { Text("Campus Announcements", fontWeight = FontWeight.Bold, color = AppTextPrimary) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = AppBackground),
                 actions = {
+                    if (onRegisterTrustIssuer != null) {
+                        IconButton(onClick = { showTrustDialog = true }) {
+                            Icon(Icons.Default.VerifiedUser, contentDescription = "Campus Trust Setup", tint = AppPrimaryAccent)
+                        }
+                    }
                     if (canCreateBroadcast) {
                         IconButton(onClick = { showCreateDialog = true }) {
                             Icon(Icons.Default.Campaign, contentDescription = "Create Announcement", tint = AppPrimaryAccent)
@@ -249,6 +261,83 @@ fun CampusBroadcastScreen(
                     dismissButton = {
                         TextButton(onClick = { showCreateDialog = false }) {
                             Text("Cancel")
+                        }
+                    }
+                )
+            }
+
+            if (showTrustDialog && onRegisterTrustIssuer != null) {
+                AlertDialog(
+                    onDismissRequest = {
+                        showTrustDialog = false
+                        trustErrorMessage = null
+                        trustSuccessMessage = null
+                    },
+                    title = { Text("Campus Trust Anchor Setup", fontWeight = FontWeight.Bold) },
+                    text = {
+                        Column {
+                            Text(
+                                "Enroll trusted campus authority ID and EC P-256 public key (Base64 or Hex) to verify offline campus broadcasts.",
+                                fontSize = 12.sp,
+                                color = AppTextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            OutlinedTextField(
+                                value = issuerIdInput,
+                                onValueChange = { issuerIdInput = it; trustErrorMessage = null },
+                                label = { Text("Campus Issuer ID (Hex or Dec)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = publicKeyInput,
+                                onValueChange = { publicKeyInput = it; trustErrorMessage = null },
+                                label = { Text("Issuer Public Key (Base64 / Hex)") },
+                                modifier = Modifier.fillMaxWidth(),
+                                minLines = 2
+                            )
+
+                            if (trustErrorMessage != null) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(trustErrorMessage!!, color = AppEmergencyRed, fontSize = 12.sp)
+                            }
+                            if (trustSuccessMessage != null) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(trustSuccessMessage!!, color = AppSuccessGreen, fontSize = 12.sp)
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                if (issuerIdInput.isNotBlank() && publicKeyInput.isNotBlank()) {
+                                    val success = onRegisterTrustIssuer(issuerIdInput, publicKeyInput)
+                                    if (success) {
+                                        trustSuccessMessage = "Campus Issuer Enrolled Successfully!"
+                                        trustErrorMessage = null
+                                        issuerIdInput = ""
+                                        publicKeyInput = ""
+                                    } else {
+                                        trustErrorMessage = "Invalid Public Key format or ID"
+                                        trustSuccessMessage = null
+                                    }
+                                } else {
+                                    trustErrorMessage = "Please fill in all fields"
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = AppPrimaryAccent)
+                        ) {
+                            Text("Enroll Trust Anchor")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showTrustDialog = false
+                            trustErrorMessage = null
+                            trustSuccessMessage = null
+                        }) {
+                            Text("Close")
                         }
                     }
                 )

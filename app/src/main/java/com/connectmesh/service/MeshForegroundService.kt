@@ -273,6 +273,23 @@ class MeshForegroundService : Service() {
             }
         }
 
+        // Restore persisted trusted campus issuers from SharedPreferences
+        try {
+            val prefs = getSharedPreferences("connect_mesh_trusted_issuers", Context.MODE_PRIVATE)
+            prefs.all.forEach { (key, value) ->
+                val savedIssuerId = key.toLongOrNull()
+                val hexKey = value as? String
+                if (savedIssuerId != null && !hexKey.isNullOrBlank()) {
+                    val keyBytes = authorizationManager.decodePublicKey(hexKey)
+                    if (keyBytes != null) {
+                        authorizationManager.registerTrustedIssuer(savedIssuerId, keyBytes)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            NetworkEventLogger.log("CONNECT_MESH_AUTH: ERROR restoring trusted issuers from prefs: ${e.message}")
+        }
+
         classroomManager = ClassroomManager(authorizationManager)
         campusBroadcastManager = CampusBroadcastManager(authorizationManager)
         staticRelayController = StaticRelayController(deduplicationManager, relayManager)
@@ -866,6 +883,24 @@ class MeshForegroundService : Service() {
             dbHelper.saveToOutbox(outboxEntry)
         }
         return bc
+    }
+
+    fun registerTrustedCampusIssuer(issuerId: Long, publicKeyString: String): Boolean {
+        val keyBytes = authorizationManager.decodePublicKey(publicKeyString) ?: return false
+        authorizationManager.registerTrustedIssuer(issuerId, keyBytes)
+        saveTrustedIssuerToPrefs(issuerId, keyBytes)
+        NetworkEventLogger.log("CONNECT_MESH_AUTH: TRUSTED_CAMPUS_ISSUER_ENROLLED id=0x${issuerId.toString(16).uppercase()}")
+        return true
+    }
+
+    private fun saveTrustedIssuerToPrefs(issuerId: Long, keyBytes: ByteArray) {
+        try {
+            val prefs = getSharedPreferences("connect_mesh_trusted_issuers", Context.MODE_PRIVATE)
+            val hexKey = keyBytes.joinToString("") { "%02x".format(it) }
+            prefs.edit().putString(issuerId.toString(), hexKey).apply()
+        } catch (e: Exception) {
+            NetworkEventLogger.log("CONNECT_MESH_AUTH: ERROR saving trusted issuer to prefs: ${e.message}")
+        }
     }
 
     fun updateNickname(newNickname: String) {

@@ -28,6 +28,43 @@ class AuthorizationManager(
 
     fun getTrustedIssuerKey(issuerId: Long): ByteArray? = trustedIssuers[issuerId]
 
+    fun decodePublicKey(input: String): ByteArray? = Companion.decodePublicKey(input)
+
+    companion object {
+        fun decodePublicKey(input: String): ByteArray? {
+            val clean = input.trim()
+            if (clean.isEmpty()) return null
+
+            // Try Hex decoding first if it matches hex string format
+            if (clean.matches(Regex("^[0-9a-fA-F]+$")) && clean.length % 2 == 0) {
+                try {
+                    val bytes = clean.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    val keySpec = java.security.spec.X509EncodedKeySpec(bytes)
+                    java.security.KeyFactory.getInstance("EC").generatePublic(keySpec)
+                    return bytes
+                } catch (_: Exception) {}
+            }
+
+            // Try standard Base64 decoding
+            try {
+                val bytes = java.util.Base64.getDecoder().decode(clean)
+                val keySpec = java.security.spec.X509EncodedKeySpec(bytes)
+                java.security.KeyFactory.getInstance("EC").generatePublic(keySpec)
+                return bytes
+            } catch (_: Exception) {}
+
+            // Try Base64 MIME decoder (handles line breaks / formatting)
+            try {
+                val bytes = java.util.Base64.getMimeDecoder().decode(clean)
+                val keySpec = java.security.spec.X509EncodedKeySpec(bytes)
+                java.security.KeyFactory.getInstance("EC").generatePublic(keySpec)
+                return bytes
+            } catch (_: Exception) {}
+
+            return null
+        }
+    }
+
     fun setLocalCredential(credential: RoleCredential) {
         if (localPublicKeyBytes == null) {
             NetworkEventLogger.log("CONNECT_MESH_AUTH: ERROR - local identity not initialized before setting credential")

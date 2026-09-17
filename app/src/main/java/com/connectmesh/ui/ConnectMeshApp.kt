@@ -324,6 +324,13 @@ fun ConnectMeshApp(
                                     canCreateBroadcast = service.authorizationManager.hasRole(com.connectmesh.auth.UserRole.ADMIN),
                                     onCreateBroadcast = { title, msg, priority ->
                                         service.createCampusBroadcast(title, msg, priority)
+                                    },
+                                    onRegisterTrustIssuer = { issuerIdStr, pubKeyStr ->
+                                        val cleanIdStr = issuerIdStr.trim().removePrefix("0x").removePrefix("0X")
+                                        val issuerId = cleanIdStr.toLongOrNull(16)
+                                            ?: cleanIdStr.toLongOrNull()
+                                            ?: 0L
+                                        service.registerTrustedCampusIssuer(issuerId, pubKeyStr)
                                     }
                                 )
                             }
