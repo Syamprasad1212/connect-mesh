@@ -463,5 +463,82 @@ class ClassroomSecurityTest {
         assertFalse(group!!.joinCode.contains(group.activeGroupKeyHex))
         assertTrue(group.activeGroupKeyHex.length == 64) // 256-bit Hex Key
     }
+
+    @Test
+    fun test25_ClassroomInviteBroadcastOmitsActiveGroupKeyHex() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+
+        // Formatted secure broadcast string
+        val payloadStr = "CLASSROOM_INVITE|${group!!.groupId}|${group.groupName}|${group.institutionScope}|${group.createdByConnectMeshId}|${group.createdAt}|${group.groupKeyVersion}||${group.joinCode}"
+
+        assertFalse(payloadStr.contains(group.activeGroupKeyHex))
+        val parts = payloadStr.split("|")
+        assertEquals("", parts[7]) // Key field is empty
+        assertEquals(group.joinCode, parts[8])
+    }
+
+    @Test
+    fun test26_PassiveListenerReceivesMetadataOnly() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+
+        val payloadStr = "CLASSROOM_INVITE|${group!!.groupId}|${group.groupName}|${group.institutionScope}|${group.createdByConnectMeshId}|${group.createdAt}|${group.groupKeyVersion}||${group.joinCode}"
+        val parts = payloadStr.split("|")
+
+        val metadataGroup = ClassroomGroup(
+            groupId = parts[1],
+            groupName = parts[2],
+            institutionScope = parts[3],
+            createdByConnectMeshId = parts[4].toLong(),
+            createdAt = parts[5].toLong(),
+            groupKeyVersion = parts[6].toInt(),
+            activeGroupKeyHex = parts[7], // Empty string
+            joinCode = parts[8]
+        )
+
+        assertEquals("", metadataGroup.activeGroupKeyHex)
+        assertNotEquals(group.activeGroupKeyHex, metadataGroup.activeGroupKeyHex)
+    }
+
+    @Test
+    fun test27_KeyResponseExchangeDeliversKeyUponValidJoinCode() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+
+        val reqStr = "CLASSROOM_KEY_REQUEST|${group!!.groupId}|${group.joinCode}"
+        val parts = reqStr.split("|")
+        val reqGroupId = parts[1]
+        val reqJoinCode = parts[2]
+
+        val storedGroup = classroomManager.getClassroom(reqGroupId)
+        assertNotNull(storedGroup)
+
+        val isValidCode = storedGroup!!.joinCode.equals(reqJoinCode, ignoreCase = true)
+        assertTrue(isValidCode)
+
+        val respStr = "CLASSROOM_KEY_RESPONSE|${group.groupId}|${group.activeGroupKeyHex}|${group.joinCode}"
+        val respParts = respStr.split("|")
+
+        assertEquals(group.groupId, respParts[1])
+        assertEquals(group.activeGroupKeyHex, respParts[2])
+    }
+
+    @Test
+    fun test28_InvalidJoinCodeKeyRequestIsRejected() {
+        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
+        assertNotNull(group)
+
+        val reqStr = "CLASSROOM_KEY_REQUEST|${group!!.groupId}|WRONGCODE"
+        val parts = reqStr.split("|")
+        val reqJoinCode = parts[2]
+
+        val storedGroup = classroomManager.getClassroom(group.groupId)
+        assertNotNull(storedGroup)
+
+        val isValidCode = storedGroup!!.joinCode.equals(reqJoinCode, ignoreCase = true)
+        assertFalse(isValidCode)
+    }
 }
+
 
