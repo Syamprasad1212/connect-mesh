@@ -513,6 +513,7 @@ class MeshForegroundService : Service() {
                             )
                             dispatchOrQueuePacket(packet.header.sourceId, PacketEncoder.encode(Packet(header, payload = msg3)))
                         }
+                        drainPendingOutboxForPeer(packet.header.sourceId)
                     }
                     PacketType.MESSAGE -> {
                         val session = SessionManager.getSession(packet.header.sourceId)
@@ -1128,35 +1129,6 @@ class MeshForegroundService : Service() {
         )
 
         try {
-            val session = SessionManager.getEstablishedSession(recipientId)
-            val (encryptedBytes, macTag) = if (session != null) {
-                val dummyHeader = PacketHeader(
-                    packetType = PacketType.MESSAGE,
-                    packetId = messageId,
-                    sourceId = deviceIdentity.deviceId,
-                    destinationId = recipientId,
-                    payloadLength = plainBytes.size.toShort(),
-                    ttl = 7,
-                    timestamp = timestamp
-                )
-                val aad = dummyHeader.constructAad()
-                session.encryptPayloadWithMacAndAad(plainBytes, aad)
-            } else {
-                Pair(plainBytes, null)
-            }
-
-            val header = PacketHeader(
-                packetType = PacketType.MESSAGE,
-                packetId = messageId,
-                sourceId = deviceIdentity.deviceId,
-                destinationId = recipientId,
-                payloadLength = encryptedBytes.size.toShort(),
-                ttl = 7,
-                timestamp = timestamp
-            )
-            val packet = Packet(header, payload = encryptedBytes, macTag = macTag ?: ByteArray(16))
-            val encodedBytes = PacketEncoder.encode(packet)
-
             _messagesFlow.value = _messagesFlow.value + chatMessage
             dbHelper.insertOrUpdateMessage(chatMessage)
 
@@ -1174,26 +1146,44 @@ class MeshForegroundService : Service() {
             val retryTask = RetryTask(chatMessage)
             pendingRetriesMap[messageId] = retryTask
 
-            val nextHop = routeTable.getNextHop(recipientId) ?: recipientId
-            dispatchOrQueuePacket(nextHop, encodedBytes)
+            val session = SessionManager.getEstablishedSession(recipientId)
+            if (session != null) {
+                val dummyHeader = PacketHeader(
+                    packetType = PacketType.MESSAGE,
+                    packetId = messageId,
+                    sourceId = deviceIdentity.deviceId,
+                    destinationId = recipientId,
+                    payloadLength = plainBytes.size.toShort(),
+                    ttl = 7,
+                    timestamp = timestamp
+                )
+                val aad = dummyHeader.constructAad()
+                val (encryptedBytes, macTag) = session.encryptPayloadWithMacAndAad(plainBytes, aad)
 
-            NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_SENT id=$messageId destination=0x${recipientId.toString(16).uppercase()}")
+                val header = PacketHeader(
+                    packetType = PacketType.MESSAGE,
+                    packetId = messageId,
+                    sourceId = deviceIdentity.deviceId,
+                    destinationId = recipientId,
+                    payloadLength = encryptedBytes.size.toShort(),
+                    ttl = 7,
+                    timestamp = timestamp
+                )
+                val packet = Packet(header, payload = encryptedBytes, macTag = macTag)
+                val encodedBytes = PacketEncoder.encode(packet)
+
+                val nextHop = routeTable.getNextHop(recipientId) ?: recipientId
+                dispatchOrQueuePacket(nextHop, encodedBytes)
+                NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_SENT_ENCRYPTED id=$messageId destination=0x${recipientId.toString(16).uppercase()}")
+            } else {
+                NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_QUEUED_WAITING_FOR_SESSION id=$messageId destination=0x${recipientId.toString(16).uppercase()}")
+                val peer = peerManager.getPeer(recipientId)
+                if (peer != null && peer.bleAddress.isNotBlank()) {
+                    connectionManager.connectToPeer(recipientId, peer.bleAddress)
+                }
+            }
         } catch (e: Exception) {
             NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_SEND_EXCEPTION id=$messageId err=${e.message}")
-            _messagesFlow.value = _messagesFlow.value + chatMessage
-            try {
-                dbHelper.insertOrUpdateMessage(chatMessage)
-                val outboxEntry = OutboxEntry(
-                    messageId = messageId,
-                    senderId = deviceIdentity.deviceId,
-                    recipientId = recipientId,
-                    messageType = "TEXT",
-                    payload = plainBytes,
-                    createdAt = timestamp,
-                    status = OutboxStatus.PENDING
-                )
-                dbHelper.saveToOutbox(outboxEntry)
-            } catch (ex: Exception) {}
         }
         return chatMessage
     }
@@ -1240,43 +1230,42 @@ class MeshForegroundService : Service() {
         val nextHop = routeTable.getNextHop(recipientId) ?: recipientId
 
         val session = SessionManager.getEstablishedSession(recipientId)
-
-        fragments.forEach { frag ->
-            val fragHeader = FragmentHeader(
-                fragmentId = frag.transferId,
-                fragmentIndex = frag.index,
-                totalFragments = frag.total,
-                crc32 = frag.crc32
-            )
-            val header = PacketHeader(
-                packetType = PacketType.VOICE_FRAGMENT,
-                packetId = System.nanoTime(),
-                sourceId = deviceIdentity.deviceId,
-                destinationId = recipientId,
-                payloadLength = frag.data.size.toShort(),
-                ttl = 7,
-                timestamp = timestamp
-            )
-
-            val (encData, macTag) = if (session != null) {
+        if (session != null) {
+            fragments.forEach { frag ->
+                val fragHeader = FragmentHeader(
+                    fragmentId = frag.transferId,
+                    fragmentIndex = frag.index,
+                    totalFragments = frag.total,
+                    crc32 = frag.crc32
+                )
+                val header = PacketHeader(
+                    packetType = PacketType.VOICE_FRAGMENT,
+                    packetId = System.nanoTime(),
+                    sourceId = deviceIdentity.deviceId,
+                    destinationId = recipientId,
+                    payloadLength = frag.data.size.toShort(),
+                    ttl = 7,
+                    timestamp = timestamp
+                )
                 val aad = constructVoiceFragmentAad(header, fragHeader)
-                session.encryptPayloadWithMacAndAad(frag.data, aad)
-            } else {
-                Pair(frag.data, null)
-            }
+                val (encData, macTag) = session.encryptPayloadWithMacAndAad(frag.data, aad)
 
-            val packet = Packet(
-                header = header,
-                fragmentHeader = fragHeader,
-                payload = encData,
-                macTag = macTag ?: ByteArray(16)
-            )
-            dispatchOrQueuePacket(
-                nextHop,
-                PacketEncoder.encode(packet),
-                transferId = voiceTransferId,
-                priority = BleOperationQueue.Priority.BULK
-            )
+                val packet = Packet(
+                    header = header,
+                    fragmentHeader = fragHeader,
+                    payload = encData,
+                    macTag = macTag
+                )
+                dispatchOrQueuePacket(
+                    nextHop,
+                    PacketEncoder.encode(packet),
+                    transferId = voiceTransferId,
+                    priority = BleOperationQueue.Priority.BULK
+                )
+            }
+            NetworkEventLogger.log("CONNECT_MESH_DELIVERY: VOICE_SENT_ENCRYPTED id=$voiceTransferId destination=0x${recipientId.toString(16).uppercase()}")
+        } else {
+            NetworkEventLogger.log("CONNECT_MESH_DELIVERY: VOICE_QUEUED_WAITING_FOR_SESSION id=$voiceTransferId destination=0x${recipientId.toString(16).uppercase()}")
         }
 
         NetworkEventLogger.log("CONNECT_MESH_DELIVERY: VOICE_SENT id=$voiceTransferId destination=0x${recipientId.toString(16).uppercase()} fragments=${fragments.size}")
@@ -1376,132 +1365,125 @@ class MeshForegroundService : Service() {
             ttl = 7
         )
         val session = SessionManager.getEstablishedSession(targetPeerId)
-        val (encStartPayload, startMacTag) = if (session != null) {
+        if (session != null) {
             val aad = startHeader.constructAad()
-            session.encryptPayloadWithMacAndAad(startPayload, aad)
-        } else Pair(startPayload, null)
+            val (encStartPayload, startMacTag) = session.encryptPayloadWithMacAndAad(startPayload, aad)
+            val startPacket = Packet(startHeader, payload = encStartPayload, macTag = startMacTag)
+            val nextHop = routeTable.getNextHop(targetPeerId) ?: targetPeerId
+            dispatchOrQueuePacket(nextHop, PacketEncoder.encode(startPacket), transferId = transferId, priority = BleOperationQueue.Priority.HIGH)
 
-        val startPacket = Packet(startHeader, payload = encStartPayload, macTag = startMacTag ?: ByteArray(16))
-        val nextHop = routeTable.getNextHop(targetPeerId) ?: targetPeerId
-        dispatchOrQueuePacket(nextHop, PacketEncoder.encode(startPacket), transferId = transferId, priority = BleOperationQueue.Priority.HIGH)
-
-        val sendJob = serviceScope.launch {
-            try {
-                state.status = FileManager.Status.SENDING
-                dbHelper.updateFileStatus(transferId, FileManager.Status.SENDING, 0, false, DeliveryStatus.SENDING)
-                _messagesFlow.value = _messagesFlow.value.map {
-                    if (it.fileTransferId == transferId) it.copy(fileStatus = FileManager.Status.SENDING) else it
-                }
-
-                val inputStream = contentResolver.openInputStream(uri)
-                if (inputStream == null) {
-                    NetworkEventLogger.log("CONNECT_MESH_FILE: STREAM_NULL transferId=$transferId")
-                    state.status = FileManager.Status.FAILED
-                    dbHelper.updateFileStatus(transferId, FileManager.Status.FAILED, 0, false, DeliveryStatus.FAILED)
+            val sendJob = serviceScope.launch {
+                try {
+                    state.status = FileManager.Status.SENDING
+                    dbHelper.updateFileStatus(transferId, FileManager.Status.SENDING, 0, false, DeliveryStatus.SENDING)
                     _messagesFlow.value = _messagesFlow.value.map {
-                        if (it.fileTransferId == transferId) it.copy(fileStatus = FileManager.Status.FAILED, deliveryStatus = DeliveryStatus.FAILED) else it
+                        if (it.fileTransferId == transferId) it.copy(fileStatus = FileManager.Status.SENDING) else it
                     }
-                    return@launch
-                }
 
-                val buffer = ByteArray(chunkSize)
-                var bytesRead: Int
-                var chunkIndex = 0
+                    val inputStream = contentResolver.openInputStream(uri)
+                    if (inputStream == null) {
+                        NetworkEventLogger.log("CONNECT_MESH_FILE: STREAM_NULL transferId=$transferId")
+                        state.status = FileManager.Status.FAILED
+                        dbHelper.updateFileStatus(transferId, FileManager.Status.FAILED, 0, false, DeliveryStatus.FAILED)
+                        _messagesFlow.value = _messagesFlow.value.map {
+                            if (it.fileTransferId == transferId) it.copy(fileStatus = FileManager.Status.FAILED, deliveryStatus = DeliveryStatus.FAILED) else it
+                        }
+                        return@launch
+                    }
 
-                inputStream.use { stream ->
-                    while (stream.read(buffer).also { bytesRead = it } != -1 && state.status == FileManager.Status.SENDING) {
-                        val chunkData = if (bytesRead == chunkSize) buffer else buffer.copyOf(bytesRead)
-                        val chunkPayload = FileManager.encodeFileChunkPayload(transferId, chunkIndex, totalChunks, chunkData)
+                    val buffer = ByteArray(chunkSize)
+                    var bytesRead: Int
+                    var chunkIndex = 0
 
-                        val session = SessionManager.getEstablishedSession(targetPeerId)
-                        val dummyHeader = PacketHeader(
-                            packetType = PacketType.FILE_CHUNK,
+                    inputStream.use { stream ->
+                        while (stream.read(buffer).also { bytesRead = it } != -1 && state.status == FileManager.Status.SENDING) {
+                            val chunkData = if (bytesRead == chunkSize) buffer else buffer.copyOf(bytesRead)
+                            val chunkPayload = FileManager.encodeFileChunkPayload(transferId, chunkIndex, totalChunks, chunkData)
+
+                            val activeSession = SessionManager.getEstablishedSession(targetPeerId) ?: break
+                            val dummyHeader = PacketHeader(
+                                packetType = PacketType.FILE_CHUNK,
+                                packetId = System.nanoTime(),
+                                sourceId = deviceIdentity.deviceId,
+                                destinationId = targetPeerId,
+                                payloadLength = chunkPayload.size.toShort(),
+                                ttl = 7
+                            )
+
+                            val (encChunk, macTag) = activeSession.encryptPayloadWithMacAndAad(chunkPayload, dummyHeader.constructAad())
+                            val chunkPacket = Packet(
+                                header = dummyHeader,
+                                payload = encChunk,
+                                macTag = macTag
+                            )
+
+                            dispatchOrQueuePacket(
+                                nextHop,
+                                PacketEncoder.encode(chunkPacket),
+                                transferId = transferId,
+                                priority = BleOperationQueue.Priority.BULK
+                            )
+
+                            chunkIndex++
+                            state.chunksTransferred = chunkIndex
+                            state.bytesTransferred += chunkData.size
+                            val progress = state.progressPercentage
+
+                            dbHelper.updateFileStatus(transferId, FileManager.Status.SENDING, progress, false, DeliveryStatus.SENDING)
+                            _messagesFlow.value = _messagesFlow.value.map {
+                                if (it.fileTransferId == transferId) it.copy(fileProgress = progress) else it
+                            }
+                            delay(15)
+                        }
+                    }
+
+                    if (state.status == FileManager.Status.SENDING) {
+                        connectionManager.awaitTransferBulkDrain(targetPeerId, transferId, 15_000L)
+                        val endPayload = ByteBuffer.allocate(8).putLong(transferId).array()
+                        val endHeader = PacketHeader(
+                            packetType = PacketType.FILE_END,
                             packetId = System.nanoTime(),
                             sourceId = deviceIdentity.deviceId,
                             destinationId = targetPeerId,
-                            payloadLength = chunkPayload.size.toShort(),
+                            payloadLength = endPayload.size.toShort(),
                             ttl = 7
                         )
-
-                        val (encChunk, macTag) = if (session != null) {
-                            val aad = dummyHeader.constructAad()
-                            session.encryptPayloadWithMacAndAad(chunkPayload, aad)
-                        } else {
-                            Pair(chunkPayload, null)
+                        val endSession = SessionManager.getEstablishedSession(targetPeerId)
+                        if (endSession != null) {
+                            val (encEndPayload, endMacTag) = endSession.encryptPayloadWithMacAndAad(endPayload, endHeader.constructAad())
+                            val endPacket = Packet(endHeader, payload = encEndPayload, macTag = endMacTag)
+                            dispatchOrQueuePacket(
+                                nextHop,
+                                PacketEncoder.encode(endPacket),
+                                transferId = transferId,
+                                priority = BleOperationQueue.Priority.HIGH
+                            )
                         }
-
-                        val chunkPacket = Packet(
-                            header = dummyHeader,
-                            payload = encChunk,
-                            macTag = macTag ?: ByteArray(16)
-                        )
-
-                        dispatchOrQueuePacket(
-                            nextHop,
-                            PacketEncoder.encode(chunkPacket),
-                            transferId = transferId,
-                            priority = BleOperationQueue.Priority.BULK
-                        )
-
-                        chunkIndex++
-                        state.chunksTransferred = chunkIndex
-                        state.bytesTransferred += chunkData.size
-                        val progress = state.progressPercentage
-
-                        dbHelper.updateFileStatus(transferId, FileManager.Status.SENDING, progress, false, DeliveryStatus.SENDING)
+                        state.status = FileManager.Status.WAITING_FOR_ACK
+                        dbHelper.updateFileStatus(transferId, FileManager.Status.WAITING_FOR_ACK, 100, false, DeliveryStatus.SENDING)
                         _messagesFlow.value = _messagesFlow.value.map {
-                            if (it.fileTransferId == transferId) it.copy(fileProgress = progress) else it
+                            if (it.fileTransferId == transferId) it.copy(fileStatus = FileManager.Status.WAITING_FOR_ACK, fileProgress = 100) else it
                         }
-                        delay(15)
+                        startWaitingForAckTimeout(targetPeerId, transferId)
                     }
-                }
-
-                if (state.status == FileManager.Status.SENDING) {
-                    connectionManager.awaitTransferBulkDrain(targetPeerId, transferId, 15_000L)
-                    val endPayload = ByteBuffer.allocate(8).putLong(transferId).array()
-                    val endHeader = PacketHeader(
-                        packetType = PacketType.FILE_END,
-                        packetId = System.nanoTime(),
-                        sourceId = deviceIdentity.deviceId,
-                        destinationId = targetPeerId,
-                        payloadLength = endPayload.size.toShort(),
-                        ttl = 7
-                    )
-                    val session = SessionManager.getEstablishedSession(targetPeerId)
-                    val (encEndPayload, endMacTag) = if (session != null) {
-                        val aad = endHeader.constructAad()
-                        session.encryptPayloadWithMacAndAad(endPayload, aad)
-                    } else Pair(endPayload, null)
-
-                    val endPacket = Packet(endHeader, payload = encEndPayload, macTag = endMacTag ?: ByteArray(16))
-                    dispatchOrQueuePacket(
-                        nextHop,
-                        PacketEncoder.encode(endPacket),
-                        transferId = transferId,
-                        priority = BleOperationQueue.Priority.HIGH
-                    )
-                    state.status = FileManager.Status.WAITING_FOR_ACK
-                    dbHelper.updateFileStatus(transferId, FileManager.Status.WAITING_FOR_ACK, 100, false, DeliveryStatus.SENDING)
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    NetworkEventLogger.log("CONNECT_MESH_FILE: SEND_EXCEPTION: ${e.message}")
+                    state.status = FileManager.Status.FAILED
+                    cancelWaitingForAckTimeout(transferId)
+                    connectionManager.cancelTransferOperations(targetPeerId, transferId)
+                    dbHelper.updateFileStatus(transferId, FileManager.Status.FAILED, state.progressPercentage, false, DeliveryStatus.FAILED)
                     _messagesFlow.value = _messagesFlow.value.map {
-                        if (it.fileTransferId == transferId) it.copy(fileStatus = FileManager.Status.WAITING_FOR_ACK, fileProgress = 100) else it
+                        if (it.fileTransferId == transferId) it.copy(fileStatus = FileManager.Status.FAILED, deliveryStatus = DeliveryStatus.FAILED) else it
                     }
-                    startWaitingForAckTimeout(targetPeerId, transferId)
+                    activeTransfers.remove(transferId)
                 }
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                NetworkEventLogger.log("CONNECT_MESH_FILE: SEND_EXCEPTION: ${e.message}")
-                state.status = FileManager.Status.FAILED
-                cancelWaitingForAckTimeout(transferId)
-                connectionManager.cancelTransferOperations(targetPeerId, transferId)
-                dbHelper.updateFileStatus(transferId, FileManager.Status.FAILED, state.progressPercentage, false, DeliveryStatus.FAILED)
-                _messagesFlow.value = _messagesFlow.value.map {
-                    if (it.fileTransferId == transferId) it.copy(fileStatus = FileManager.Status.FAILED, deliveryStatus = DeliveryStatus.FAILED) else it
-                }
-                activeTransfers.remove(transferId)
             }
+            fileSendJobs[transferId] = sendJob
+            sendJob.invokeOnCompletion { fileSendJobs.remove(transferId) }
+        } else {
+            NetworkEventLogger.log("CONNECT_MESH_FILE: FILE_QUEUED_WAITING_FOR_SESSION transferId=$transferId destination=0x${targetPeerId.toString(16).uppercase()}")
         }
-        fileSendJobs[transferId] = sendJob
-        sendJob.invokeOnCompletion { fileSendJobs.remove(transferId) }
         return msg
     }
 
@@ -2195,6 +2177,46 @@ class MeshForegroundService : Service() {
                     broadcastNameAnnounce()
                 }
                 delay(30_000L)
+            }
+        }
+    }
+
+    fun drainPendingOutboxForPeer(peerId: Long) {
+        serviceScope.launch {
+            val session = SessionManager.getEstablishedSession(peerId) ?: return@launch
+            val pendingForPeer = pendingRetriesMap.filter { it.value.message.recipientId == peerId }
+            pendingForPeer.forEach { (packetId, retryTask) ->
+                val now = System.currentTimeMillis()
+                retryTask.lastAttemptTime = now
+                val recipientId = retryTask.message.recipientId
+                val nextHop = routeTable.getNextHop(recipientId) ?: recipientId
+
+                if (!retryTask.message.isFile && !retryTask.message.isVoice && retryTask.message.fileTransferId == 0L) {
+                    val textBytes = retryTask.message.text.toByteArray(Charsets.UTF_8)
+                    val dummyHeader = PacketHeader(
+                        packetType = PacketType.MESSAGE,
+                        packetId = retryTask.message.id,
+                        sourceId = deviceIdentity.deviceId,
+                        destinationId = recipientId,
+                        payloadLength = textBytes.size.toShort(),
+                        ttl = 7
+                    )
+                    val (encBytes, macTag) = session.encryptPayloadWithMacAndAad(textBytes, dummyHeader.constructAad())
+                    val packet = Packet(
+                        header = PacketHeader(
+                            packetType = PacketType.MESSAGE,
+                            packetId = retryTask.message.id,
+                            sourceId = deviceIdentity.deviceId,
+                            destinationId = recipientId,
+                            payloadLength = encBytes.size.toShort(),
+                            ttl = 7
+                        ),
+                        payload = encBytes,
+                        macTag = macTag
+                    )
+                    dispatchOrQueuePacket(nextHop, PacketEncoder.encode(packet), priority = BleOperationQueue.Priority.HIGH)
+                    NetworkEventLogger.log("CONNECT_MESH_DELIVERY: QUEUED_OUTBOX_SENT_ENCRYPTED id=$packetId target=0x${recipientId.toString(16).uppercase()}")
+                }
             }
         }
     }

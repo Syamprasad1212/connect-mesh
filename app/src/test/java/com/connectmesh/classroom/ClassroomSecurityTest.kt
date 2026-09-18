@@ -559,6 +559,53 @@ class ClassroomSecurityTest {
         assertEquals("Professor's Phone", peerManager.getPeer(peerId)?.nickname)
         assertEquals("Professor's Phone", peerManager.peersFlow.value.find { it.peerId == peerId }?.nickname)
     }
+
+    @Test
+    fun test31_MessageIsNotSentPlaintextBeforeNoiseSessionEstablished() {
+        val peerId = 0x1234567890ABCDEFL
+        val localKeyPair = com.connectmesh.crypto.KeyManager.generateX25519KeyPair()
+        val remoteKeyPair = com.connectmesh.crypto.KeyManager.generateX25519KeyPair()
+
+        // 1. Unestablished session state
+        val msg1 = com.connectmesh.crypto.SessionManager.initiateSession(peerId, localKeyPair)
+        assertNotNull(msg1)
+
+        val unestablishedSession = com.connectmesh.crypto.SessionManager.getEstablishedSession(peerId)
+        assertNull(unestablishedSession) // Must be null before handshake finishes
+
+        // 2. Complete Noise XX handshake to ESTABLISHED
+        val remoteSession = com.connectmesh.crypto.NoiseXXSession(remoteKeyPair).apply {
+            initialize(com.connectmesh.crypto.NoiseXXSession.Role.RESPONDER)
+        }
+        val msg2 = remoteSession.processHandshakeMsg1AndCreateMsg2(msg1)
+        val msg3 = com.connectmesh.crypto.SessionManager.handleSessionFinish(peerId, msg2)
+        assertNotNull(msg3)
+        remoteSession.processHandshakeMsg3(msg3!!)
+
+        // 3. Established session state
+        val establishedSession = com.connectmesh.crypto.SessionManager.getEstablishedSession(peerId)
+        assertNotNull(establishedSession)
+        assertEquals(com.connectmesh.crypto.NoiseXXSession.State.ESTABLISHED, establishedSession!!.state)
+
+        // 4. Encrypt payload under established session
+        val plainText = "Secret Message".toByteArray(Charsets.UTF_8)
+        val dummyHeader = com.connectmesh.protocol.PacketHeader(
+            packetType = com.connectmesh.protocol.PacketType.MESSAGE,
+            packetId = 100L,
+            sourceId = 1L,
+            destinationId = peerId,
+            payloadLength = plainText.size.toShort(),
+            ttl = 7
+        )
+        val (cipherText, macTag) = establishedSession.encryptPayloadWithMacAndAad(plainText, dummyHeader.constructAad())
+
+        assertFalse(plainText.contentEquals(cipherText))
+        assertEquals(16, macTag.size)
+
+        val decrypted = remoteSession.decryptPayloadWithMacAndAad(cipherText, macTag, dummyHeader.constructAad())
+        assertNotNull(decrypted)
+        assertEquals("Secret Message", String(decrypted!!, Charsets.UTF_8))
+    }
 }
 
 
