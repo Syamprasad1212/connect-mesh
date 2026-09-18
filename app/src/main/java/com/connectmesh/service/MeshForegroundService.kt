@@ -378,6 +378,7 @@ class MeshForegroundService : Service() {
             },
             onPeerStateChanged = { peerId, state ->
                 if (state == BleConnectionState.READY) {
+                    broadcastNameAnnounce()
                     val challenge = PeerAuthenticator.generateChallenge()
                     sentChallengesMap[peerId] = challenge
                     val authHeader = PacketHeader(
@@ -1115,35 +1116,6 @@ class MeshForegroundService : Service() {
         val timestamp = System.currentTimeMillis()
         val plainBytes = text.toByteArray(Charsets.UTF_8)
 
-        val session = SessionManager.getSession(recipientId)
-        val (encryptedBytes, macTag) = if (session != null) {
-            val dummyHeader = PacketHeader(
-                packetType = PacketType.MESSAGE,
-                packetId = messageId,
-                sourceId = deviceIdentity.deviceId,
-                destinationId = recipientId,
-                payloadLength = plainBytes.size.toShort(),
-                ttl = 7,
-                timestamp = timestamp
-            )
-            val aad = dummyHeader.constructAad()
-            session.encryptPayloadWithMacAndAad(plainBytes, aad)
-        } else {
-            Pair(plainBytes, null)
-        }
-
-        val header = PacketHeader(
-            packetType = PacketType.MESSAGE,
-            packetId = messageId,
-            sourceId = deviceIdentity.deviceId,
-            destinationId = recipientId,
-            payloadLength = encryptedBytes.size.toShort(),
-            ttl = 7,
-            timestamp = timestamp
-        )
-        val packet = Packet(header, payload = encryptedBytes, macTag = macTag ?: ByteArray(16))
-        val encodedBytes = PacketEncoder.encode(packet)
-
         val chatMessage = ChatMessage(
             id = messageId,
             senderId = deviceIdentity.deviceId,
@@ -1154,27 +1126,75 @@ class MeshForegroundService : Service() {
             deliveryStatus = DeliveryStatus.SENDING,
             isSelf = true
         )
-        _messagesFlow.value = _messagesFlow.value + chatMessage
-        dbHelper.insertOrUpdateMessage(chatMessage)
 
-        val outboxEntry = OutboxEntry(
-            messageId = messageId,
-            senderId = deviceIdentity.deviceId,
-            recipientId = recipientId,
-            messageType = "TEXT",
-            payload = plainBytes,
-            createdAt = timestamp,
-            status = OutboxStatus.PENDING
-        )
-        dbHelper.saveToOutbox(outboxEntry)
+        try {
+            val session = SessionManager.getEstablishedSession(recipientId)
+            val (encryptedBytes, macTag) = if (session != null) {
+                val dummyHeader = PacketHeader(
+                    packetType = PacketType.MESSAGE,
+                    packetId = messageId,
+                    sourceId = deviceIdentity.deviceId,
+                    destinationId = recipientId,
+                    payloadLength = plainBytes.size.toShort(),
+                    ttl = 7,
+                    timestamp = timestamp
+                )
+                val aad = dummyHeader.constructAad()
+                session.encryptPayloadWithMacAndAad(plainBytes, aad)
+            } else {
+                Pair(plainBytes, null)
+            }
 
-        val retryTask = RetryTask(chatMessage)
-        pendingRetriesMap[messageId] = retryTask
+            val header = PacketHeader(
+                packetType = PacketType.MESSAGE,
+                packetId = messageId,
+                sourceId = deviceIdentity.deviceId,
+                destinationId = recipientId,
+                payloadLength = encryptedBytes.size.toShort(),
+                ttl = 7,
+                timestamp = timestamp
+            )
+            val packet = Packet(header, payload = encryptedBytes, macTag = macTag ?: ByteArray(16))
+            val encodedBytes = PacketEncoder.encode(packet)
 
-        val nextHop = routeTable.getNextHop(recipientId) ?: recipientId
-        dispatchOrQueuePacket(nextHop, encodedBytes)
+            _messagesFlow.value = _messagesFlow.value + chatMessage
+            dbHelper.insertOrUpdateMessage(chatMessage)
 
-        NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_SENT id=$messageId destination=0x${recipientId.toString(16).uppercase()}")
+            val outboxEntry = OutboxEntry(
+                messageId = messageId,
+                senderId = deviceIdentity.deviceId,
+                recipientId = recipientId,
+                messageType = "TEXT",
+                payload = plainBytes,
+                createdAt = timestamp,
+                status = OutboxStatus.PENDING
+            )
+            dbHelper.saveToOutbox(outboxEntry)
+
+            val retryTask = RetryTask(chatMessage)
+            pendingRetriesMap[messageId] = retryTask
+
+            val nextHop = routeTable.getNextHop(recipientId) ?: recipientId
+            dispatchOrQueuePacket(nextHop, encodedBytes)
+
+            NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_SENT id=$messageId destination=0x${recipientId.toString(16).uppercase()}")
+        } catch (e: Exception) {
+            NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_SEND_EXCEPTION id=$messageId err=${e.message}")
+            _messagesFlow.value = _messagesFlow.value + chatMessage
+            try {
+                dbHelper.insertOrUpdateMessage(chatMessage)
+                val outboxEntry = OutboxEntry(
+                    messageId = messageId,
+                    senderId = deviceIdentity.deviceId,
+                    recipientId = recipientId,
+                    messageType = "TEXT",
+                    payload = plainBytes,
+                    createdAt = timestamp,
+                    status = OutboxStatus.PENDING
+                )
+                dbHelper.saveToOutbox(outboxEntry)
+            } catch (ex: Exception) {}
+        }
         return chatMessage
     }
 
@@ -1219,7 +1239,7 @@ class MeshForegroundService : Service() {
         val fragments = fragmentVoicePayload(voiceTransferId, recipientId, voiceData)
         val nextHop = routeTable.getNextHop(recipientId) ?: recipientId
 
-        val session = SessionManager.getSession(recipientId)
+        val session = SessionManager.getEstablishedSession(recipientId)
 
         fragments.forEach { frag ->
             val fragHeader = FragmentHeader(
@@ -1355,7 +1375,7 @@ class MeshForegroundService : Service() {
             payloadLength = startPayload.size.toShort(),
             ttl = 7
         )
-        val session = SessionManager.getSession(targetPeerId)
+        val session = SessionManager.getEstablishedSession(targetPeerId)
         val (encStartPayload, startMacTag) = if (session != null) {
             val aad = startHeader.constructAad()
             session.encryptPayloadWithMacAndAad(startPayload, aad)
@@ -1393,7 +1413,7 @@ class MeshForegroundService : Service() {
                         val chunkData = if (bytesRead == chunkSize) buffer else buffer.copyOf(bytesRead)
                         val chunkPayload = FileManager.encodeFileChunkPayload(transferId, chunkIndex, totalChunks, chunkData)
 
-                        val session = SessionManager.getSession(targetPeerId)
+                        val session = SessionManager.getEstablishedSession(targetPeerId)
                         val dummyHeader = PacketHeader(
                             packetType = PacketType.FILE_CHUNK,
                             packetId = System.nanoTime(),
@@ -1447,7 +1467,7 @@ class MeshForegroundService : Service() {
                         payloadLength = endPayload.size.toShort(),
                         ttl = 7
                     )
-                    val session = SessionManager.getSession(targetPeerId)
+                    val session = SessionManager.getEstablishedSession(targetPeerId)
                     val (encEndPayload, endMacTag) = if (session != null) {
                         val aad = endHeader.constructAad()
                         session.encryptPayloadWithMacAndAad(endPayload, aad)
@@ -1529,7 +1549,7 @@ class MeshForegroundService : Service() {
                 payloadLength = cancelPayload.size.toShort(),
                 ttl = 7
             )
-            val session = SessionManager.getSession(state.metadata.recipientId)
+            val session = SessionManager.getEstablishedSession(state.metadata.recipientId)
             val (encCancelPayload, cancelMacTag) = if (session != null) {
                 val aad = cancelHeader.constructAad()
                 session.encryptPayloadWithMacAndAad(cancelPayload, aad)
@@ -1712,7 +1732,7 @@ class MeshForegroundService : Service() {
                     payloadLength = ackPayload.size.toShort(),
                     ttl = 7
                 )
-                val session = SessionManager.getSession(state.metadata.senderId)
+                val session = SessionManager.getEstablishedSession(state.metadata.senderId)
                 val (encAckPayload, ackMacTag) = if (session != null) {
                     val aad = ackHeader.constructAad()
                     session.encryptPayloadWithMacAndAad(ackPayload, aad)
@@ -1738,7 +1758,7 @@ class MeshForegroundService : Service() {
                     payloadLength = ackPayload.size.toShort(),
                     ttl = 7
                 )
-                val session = SessionManager.getSession(state.metadata.senderId)
+                val session = SessionManager.getEstablishedSession(state.metadata.senderId)
                 val (encAckPayload, ackMacTag) = if (session != null) {
                     val aad = ackHeader.constructAad()
                     session.encryptPayloadWithMacAndAad(ackPayload, aad)
@@ -1755,7 +1775,7 @@ class MeshForegroundService : Service() {
 
     private fun handleFileChunk(packet: Packet) {
         val targetPacket = if (packet.macTag.size == BleConstants.MAC_TAG_SIZE) {
-            val session = SessionManager.getSession(packet.header.sourceId)
+            val session = SessionManager.getEstablishedSession(packet.header.sourceId)
             if (session != null) {
                 val dummyHeader = PacketHeader(
                     packetType = PacketType.FILE_CHUNK,
@@ -1822,7 +1842,7 @@ class MeshForegroundService : Service() {
                     payloadLength = ackPayload.size.toShort(),
                     ttl = 7
                 )
-                val session = SessionManager.getSession(targetPacket.header.sourceId)
+                val session = SessionManager.getEstablishedSession(targetPacket.header.sourceId)
                 val (encAckPayload, ackMacTag) = if (session != null) {
                     val aad = ackHeader.constructAad()
                     session.encryptPayloadWithMacAndAad(ackPayload, aad)
@@ -1849,7 +1869,7 @@ class MeshForegroundService : Service() {
                     payloadLength = nackPayload.size.toShort(),
                     ttl = 7
                 )
-                val session = SessionManager.getSession(state.metadata.senderId)
+                val session = SessionManager.getEstablishedSession(state.metadata.senderId)
                 val (encAckPayload, ackMacTag) = if (session != null) {
                     val aad = ackHeader.constructAad()
                     session.encryptPayloadWithMacAndAad(nackPayload, aad)
@@ -1916,7 +1936,7 @@ class MeshForegroundService : Service() {
                             raf.readFully(chunkBuf)
 
                             val chunkPayload = FileManager.encodeFileChunkPayload(transferId, chunkIdx, totalChunks, chunkBuf)
-                            val session = SessionManager.getSession(recipientId)
+                            val session = SessionManager.getEstablishedSession(recipientId)
                             val dummyHeader = PacketHeader(
                                 packetType = PacketType.FILE_CHUNK,
                                 packetId = System.nanoTime(),
@@ -1947,7 +1967,7 @@ class MeshForegroundService : Service() {
                         payloadLength = endPayload.size.toShort(),
                         ttl = 7
                     )
-                    val session = SessionManager.getSession(recipientId)
+                    val session = SessionManager.getEstablishedSession(recipientId)
                     val (encEndPayload, endMacTag) = if (session != null) {
                         val aad = endHeader.constructAad()
                         session.encryptPayloadWithMacAndAad(endPayload, aad)
@@ -2171,10 +2191,10 @@ class MeshForegroundService : Service() {
         routeAnnounceJob?.cancel()
         routeAnnounceJob = serviceScope.launch {
             while (isActive) {
-                delay(30_000L)
                 if (isBleStackRunning) {
                     broadcastNameAnnounce()
                 }
+                delay(30_000L)
             }
         }
     }
@@ -2207,7 +2227,7 @@ class MeshForegroundService : Service() {
                                         payloadLength = endPayload.size.toShort(),
                                         ttl = 7
                                     )
-                                    val session = SessionManager.getSession(recipientId)
+                                    val session = SessionManager.getEstablishedSession(recipientId)
                                     val (encEndPayload, endMacTag) = if (session != null) {
                                         val aad = endHeader.constructAad()
                                         session.encryptPayloadWithMacAndAad(endPayload, aad)
@@ -2223,7 +2243,7 @@ class MeshForegroundService : Service() {
                                 val voiceBytes = retryTask.message.voiceData
                                 if (voiceBytes != null) {
                                     val frags = fragmentVoicePayload(retryTask.message.id, recipientId, voiceBytes)
-                                    val session = SessionManager.getSession(recipientId)
+                                    val session = SessionManager.getEstablishedSession(recipientId)
                                     frags.forEach { frag ->
                                         val fragHeader = FragmentHeader(frag.transferId, frag.index, frag.total, frag.crc32)
                                         val header = PacketHeader(
@@ -2250,7 +2270,7 @@ class MeshForegroundService : Service() {
                                 }
                             } else {
                                 val textBytes = retryTask.message.text.toByteArray(Charsets.UTF_8)
-                                val session = SessionManager.getSession(recipientId)
+                                val session = SessionManager.getEstablishedSession(recipientId)
                                 val (encBytes, macTag) = if (session != null) {
                                     val dummyHeader = PacketHeader(
                                         packetType = PacketType.MESSAGE,

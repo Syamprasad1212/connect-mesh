@@ -9,6 +9,11 @@ object SessionManager {
 
     fun getSession(peerId: Long): NoiseXXSession? = activeSessions[peerId]
 
+    fun getEstablishedSession(peerId: Long): NoiseXXSession? {
+        val s = activeSessions[peerId]
+        return if (s != null && s.state == NoiseXXSession.State.ESTABLISHED) s else null
+    }
+
     fun hasEstablishedSession(peerId: Long): Boolean {
         return activeSessions[peerId]?.state == NoiseXXSession.State.ESTABLISHED
     }

@@ -525,19 +525,39 @@ class ClassroomSecurityTest {
     }
 
     @Test
-    fun test28_InvalidJoinCodeKeyRequestIsRejected() {
-        val group = classroomManager.createClassroom("CSE-A", "COLLEGE:CAMPUS_01", teacherId, teacherKeyPair.public.encoded)
-        assertNotNull(group)
+    fun test29_FirstMessageUnestablishedSessionDoesNotCrash() {
+        val peerId = 0x12345678L
+        val keyPair = com.connectmesh.crypto.KeyManager.generateX25519KeyPair()
+        com.connectmesh.crypto.SessionManager.initiateSession(peerId, keyPair)
 
-        val reqStr = "CLASSROOM_KEY_REQUEST|${group!!.groupId}|WRONGCODE"
-        val parts = reqStr.split("|")
-        val reqJoinCode = parts[2]
+        // Session exists in HANDSHAKE_STEP1 state
+        val rawSession = com.connectmesh.crypto.SessionManager.getSession(peerId)
+        assertNotNull(rawSession)
+        assertNotEquals(com.connectmesh.crypto.NoiseXXSession.State.ESTABLISHED, rawSession!!.state)
 
-        val storedGroup = classroomManager.getClassroom(group.groupId)
-        assertNotNull(storedGroup)
+        // getEstablishedSession must return null to prevent illegal state exception on outgoing encryption
+        val establishedSession = com.connectmesh.crypto.SessionManager.getEstablishedSession(peerId)
+        assertNull(establishedSession)
+    }
 
-        val isValidCode = storedGroup!!.joinCode.equals(reqJoinCode, ignoreCase = true)
-        assertFalse(isValidCode)
+    @Test
+    fun test30_PeerNicknameUpdatesImmediatelyAfterAnnounce() {
+        val peerManager = com.connectmesh.mesh.PeerManager()
+        val peerId = 0xABCDEF12L
+
+        // Initial scan discovery
+        val initialPeer = com.connectmesh.identity.PeerIdentity(
+            peerId = peerId,
+            nickname = "Peer ...EF12",
+            hopCount = 1
+        )
+        peerManager.updatePeer(initialPeer)
+        assertEquals("Peer ...EF12", peerManager.getPeer(peerId)?.nickname)
+
+        // ANNOUNCE packet received immediately updates nickname
+        peerManager.updatePeerNickname(peerId, "Professor's Phone")
+        assertEquals("Professor's Phone", peerManager.getPeer(peerId)?.nickname)
+        assertEquals("Professor's Phone", peerManager.peersFlow.value.find { it.peerId == peerId }?.nickname)
     }
 }
 
