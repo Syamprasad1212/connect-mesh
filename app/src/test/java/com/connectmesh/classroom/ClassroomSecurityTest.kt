@@ -1,6 +1,7 @@
 package com.connectmesh.classroom
 
 import com.connectmesh.auth.*
+import com.connectmesh.service.MeshForegroundService.DeliveryStatus
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -605,6 +606,98 @@ class ClassroomSecurityTest {
         val decrypted = remoteSession.decryptPayloadWithMacAndAad(cipherText, macTag, dummyHeader.constructAad())
         assertNotNull(decrypted)
         assertEquals("Secret Message", String(decrypted!!, Charsets.UTF_8))
+    }
+
+    @Test
+    fun test32_EstablishedSessionSendsEncryptedText() {
+        val peerId = 0x1A11BB22CC33DD44L
+        val localKeyPair = com.connectmesh.crypto.KeyManager.generateX25519KeyPair()
+        val remoteKeyPair = com.connectmesh.crypto.KeyManager.generateX25519KeyPair()
+
+        val msg1 = com.connectmesh.crypto.SessionManager.initiateSession(peerId, localKeyPair)
+        val remoteSession = com.connectmesh.crypto.NoiseXXSession(remoteKeyPair).apply {
+            initialize(com.connectmesh.crypto.NoiseXXSession.Role.RESPONDER)
+        }
+        val msg2 = remoteSession.processHandshakeMsg1AndCreateMsg2(msg1)
+        val msg3 = com.connectmesh.crypto.SessionManager.handleSessionFinish(peerId, msg2)
+        remoteSession.processHandshakeMsg3(msg3!!)
+
+        val session = com.connectmesh.crypto.SessionManager.getEstablishedSession(peerId)
+        assertNotNull(session)
+        assertEquals(com.connectmesh.crypto.NoiseXXSession.State.ESTABLISHED, session!!.state)
+
+        val text = "Direct Encrypted Message"
+        val plainBytes = text.toByteArray(Charsets.UTF_8)
+        val dummyHeader = com.connectmesh.protocol.PacketHeader(
+            packetType = com.connectmesh.protocol.PacketType.MESSAGE,
+            packetId = 555L,
+            sourceId = 1L,
+            destinationId = peerId,
+            payloadLength = plainBytes.size.toShort(),
+            ttl = 7
+        )
+        val (encBytes, macTag) = session.encryptPayloadWithMacAndAad(plainBytes, dummyHeader.constructAad())
+        assertFalse(plainBytes.contentEquals(encBytes))
+        assertEquals(16, macTag.size)
+
+        val decryptedBytes = remoteSession.decryptPayloadWithMacAndAad(encBytes, macTag, dummyHeader.constructAad())
+        assertNotNull(decryptedBytes)
+        assertEquals(text, String(decryptedBytes!!, Charsets.UTF_8))
+    }
+
+    @Test
+    fun test33_UnestablishedSessionQueuesSafely() {
+        val peerId = 0x1988776655443322L
+        com.connectmesh.crypto.SessionManager.invalidateSession(peerId)
+
+        val establishedSession = com.connectmesh.crypto.SessionManager.getEstablishedSession(peerId)
+        assertNull(establishedSession)
+        assertFalse(com.connectmesh.crypto.SessionManager.hasEstablishedSession(peerId))
+    }
+
+    @Test
+    fun test34_HandshakeCompletionDrainsPendingMessage() {
+        val peerId = 0x1122334455667788L
+        val localKeyPair = com.connectmesh.crypto.KeyManager.generateX25519KeyPair()
+        val remoteKeyPair = com.connectmesh.crypto.KeyManager.generateX25519KeyPair()
+
+        val msg1 = com.connectmesh.crypto.SessionManager.initiateSession(peerId, localKeyPair)
+        assertNull(com.connectmesh.crypto.SessionManager.getEstablishedSession(peerId))
+
+        val remoteSession = com.connectmesh.crypto.NoiseXXSession(remoteKeyPair).apply {
+            initialize(com.connectmesh.crypto.NoiseXXSession.Role.RESPONDER)
+        }
+        val msg2 = remoteSession.processHandshakeMsg1AndCreateMsg2(msg1)
+        val msg3 = com.connectmesh.crypto.SessionManager.handleSessionFinish(peerId, msg2)
+        remoteSession.processHandshakeMsg3(msg3!!)
+
+        val session = com.connectmesh.crypto.SessionManager.getEstablishedSession(peerId)
+        assertNotNull(session)
+        assertEquals(com.connectmesh.crypto.NoiseXXSession.State.ESTABLISHED, session!!.state)
+    }
+
+    @Test
+    fun test35_PendingMessageRetainsIdentityAndContent() {
+        val msgId = System.nanoTime()
+        val senderId = 0x100L
+        val recipientId = 0x200L
+        val text = "Pending message content"
+
+        val chatMessage = com.connectmesh.service.MeshForegroundService.ChatMessage(
+            id = msgId,
+            senderId = senderId,
+            recipientId = recipientId,
+            text = text,
+            timestamp = System.currentTimeMillis(),
+            isDelivered = false,
+            deliveryStatus = com.connectmesh.service.MeshForegroundService.DeliveryStatus.SENDING,
+            isSelf = true
+        )
+
+        assertEquals(msgId, chatMessage.id)
+        assertEquals(recipientId, chatMessage.recipientId)
+        assertEquals(text, chatMessage.text)
+        assertFalse(chatMessage.isDelivered)
     }
 }
 

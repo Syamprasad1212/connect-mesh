@@ -17,6 +17,7 @@ import com.connectmesh.auth.*
 import com.connectmesh.broadcast.*
 import com.connectmesh.classroom.*
 import com.connectmesh.crypto.CryptoManager
+import com.connectmesh.crypto.NoiseXXSession
 import com.connectmesh.crypto.PeerAuthenticator
 import com.connectmesh.crypto.SessionManager
 import com.connectmesh.db.AppDatabaseHelper
@@ -1112,6 +1113,49 @@ class MeshForegroundService : Service() {
         broadcastNameAnnounce()
     }
 
+    fun ensureSessionOrInitiate(peerId: Long) {
+        if (SessionManager.hasEstablishedSession(peerId)) return
+
+        val connInfo = connectionManager.getConnectionInfo(peerId)
+        if (connInfo != null && connInfo.state == BleConnectionState.READY) {
+            val authState = peerManager.getPeer(peerId)?.authState ?: PeerAuthState.UNAUTHENTICATED
+            if (authState == PeerAuthState.AUTHENTICATED) {
+                val session = SessionManager.getSession(peerId)
+                if (session == null || session.state == NoiseXXSession.State.UNINITIALIZED) {
+                    val msg1 = SessionManager.initiateSession(peerId, cryptoManager.staticKeyPair)
+                    val sessHeader = PacketHeader(
+                        packetType = PacketType.SESSION_INIT,
+                        packetId = System.nanoTime(),
+                        sourceId = deviceIdentity.deviceId,
+                        destinationId = peerId,
+                        payloadLength = msg1.size.toShort(),
+                        ttl = 5
+                    )
+                    dispatchOrQueuePacket(peerId, PacketEncoder.encode(Packet(sessHeader, payload = msg1)))
+                    NetworkEventLogger.log("CONNECT_MESH_SESSION: HANDSHAKE_INITIATED_FOR_PENDING_MESSAGES peerId=0x${peerId.toString(16).uppercase()}")
+                }
+            } else {
+                val challenge = PeerAuthenticator.generateChallenge()
+                sentChallengesMap[peerId] = challenge
+                val authHeader = PacketHeader(
+                    packetType = PacketType.AUTH_REQUEST,
+                    packetId = System.nanoTime(),
+                    sourceId = deviceIdentity.deviceId,
+                    destinationId = peerId,
+                    payloadLength = challenge.size.toShort(),
+                    ttl = 5
+                )
+                connectionManager.sendPacket(peerId, PacketEncoder.encode(Packet(authHeader, payload = challenge)))
+                NetworkEventLogger.log("CONNECT_MESH_AUTH: AUTH_REQUEST_SENT_FOR_SESSION peerId=0x${peerId.toString(16).uppercase()}")
+            }
+        } else {
+            val peer = peerManager.getPeer(peerId)
+            if (peer != null && peer.bleAddress.isNotBlank()) {
+                connectionManager.connectToPeer(peerId, peer.bleAddress)
+            }
+        }
+    }
+
     fun sendMessage(recipientId: Long, text: String): ChatMessage {
         val messageId = System.nanoTime()
         val timestamp = System.currentTimeMillis()
@@ -1177,10 +1221,7 @@ class MeshForegroundService : Service() {
                 NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_SENT_ENCRYPTED id=$messageId destination=0x${recipientId.toString(16).uppercase()}")
             } else {
                 NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_QUEUED_WAITING_FOR_SESSION id=$messageId destination=0x${recipientId.toString(16).uppercase()}")
-                val peer = peerManager.getPeer(recipientId)
-                if (peer != null && peer.bleAddress.isNotBlank()) {
-                    connectionManager.connectToPeer(recipientId, peer.bleAddress)
-                }
+                ensureSessionOrInitiate(recipientId)
             }
         } catch (e: Exception) {
             NetworkEventLogger.log("CONNECT_MESH_DELIVERY: TEXT_SEND_EXCEPTION id=$messageId err=${e.message}")
@@ -1266,6 +1307,7 @@ class MeshForegroundService : Service() {
             NetworkEventLogger.log("CONNECT_MESH_DELIVERY: VOICE_SENT_ENCRYPTED id=$voiceTransferId destination=0x${recipientId.toString(16).uppercase()}")
         } else {
             NetworkEventLogger.log("CONNECT_MESH_DELIVERY: VOICE_QUEUED_WAITING_FOR_SESSION id=$voiceTransferId destination=0x${recipientId.toString(16).uppercase()}")
+            ensureSessionOrInitiate(recipientId)
         }
 
         NetworkEventLogger.log("CONNECT_MESH_DELIVERY: VOICE_SENT id=$voiceTransferId destination=0x${recipientId.toString(16).uppercase()} fragments=${fragments.size}")
@@ -1483,6 +1525,7 @@ class MeshForegroundService : Service() {
             sendJob.invokeOnCompletion { fileSendJobs.remove(transferId) }
         } else {
             NetworkEventLogger.log("CONNECT_MESH_FILE: FILE_QUEUED_WAITING_FOR_SESSION transferId=$transferId destination=0x${targetPeerId.toString(16).uppercase()}")
+            ensureSessionOrInitiate(targetPeerId)
         }
         return msg
     }
@@ -2293,7 +2336,7 @@ class MeshForegroundService : Service() {
                             } else {
                                 val textBytes = retryTask.message.text.toByteArray(Charsets.UTF_8)
                                 val session = SessionManager.getEstablishedSession(recipientId)
-                                val (encBytes, macTag) = if (session != null) {
+                                if (session != null) {
                                     val dummyHeader = PacketHeader(
                                         packetType = PacketType.MESSAGE,
                                         packetId = retryTask.message.id,
@@ -2302,22 +2345,25 @@ class MeshForegroundService : Service() {
                                         payloadLength = textBytes.size.toShort(),
                                         ttl = 7
                                     )
-                                    session.encryptPayloadWithMacAndAad(textBytes, dummyHeader.constructAad())
-                                } else Pair(textBytes, null)
-
-                                val packet = Packet(
-                                    header = PacketHeader(
-                                        packetType = PacketType.MESSAGE,
-                                        packetId = retryTask.message.id,
-                                        sourceId = deviceIdentity.deviceId,
-                                        destinationId = recipientId,
-                                        payloadLength = encBytes.size.toShort(),
-                                        ttl = 7
-                                    ),
-                                    payload = encBytes,
-                                    macTag = macTag ?: ByteArray(16)
-                                )
-                                dispatchOrQueuePacket(nextHop, PacketEncoder.encode(packet), priority = BleOperationQueue.Priority.HIGH)
+                                    val (encBytes, macTag) = session.encryptPayloadWithMacAndAad(textBytes, dummyHeader.constructAad())
+                                    val packet = Packet(
+                                        header = PacketHeader(
+                                            packetType = PacketType.MESSAGE,
+                                            packetId = retryTask.message.id,
+                                            sourceId = deviceIdentity.deviceId,
+                                            destinationId = recipientId,
+                                            payloadLength = encBytes.size.toShort(),
+                                            ttl = 7
+                                        ),
+                                        payload = encBytes,
+                                        macTag = macTag
+                                    )
+                                    dispatchOrQueuePacket(nextHop, PacketEncoder.encode(packet), priority = BleOperationQueue.Priority.HIGH)
+                                    NetworkEventLogger.log("CONNECT_MESH_DELIVERY: RETRY_TEXT_SENT_ENCRYPTED id=$packetId target=0x${recipientId.toString(16).uppercase()}")
+                                } else {
+                                    NetworkEventLogger.log("CONNECT_MESH_DELIVERY: RETRY_TEXT_WAITING_FOR_SESSION id=$packetId target=0x${recipientId.toString(16).uppercase()}")
+                                    ensureSessionOrInitiate(recipientId)
+                                }
                             }
                         } else {
                             val recipientId = retryTask.message.recipientId
